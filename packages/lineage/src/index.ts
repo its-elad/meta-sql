@@ -1,3 +1,7 @@
+// ============================================================================
+// Imports
+// ============================================================================
+
 import {
   type ColumnLineageDatasetFacet,
   type InputField,
@@ -21,6 +25,10 @@ import {
 } from "node-sql-parser";
 import { HashSet } from "./hashset";
 
+// ============================================================================
+// Types
+// ============================================================================
+
 type Transformation = Exclude<_Transformation, "masking"> & {
   masking: boolean; // output boolean only for easier testing
 };
@@ -41,6 +49,10 @@ const MASKING_FUNCTIONS = new Set([
   "MASK",
   "REDACT",
 ]);
+
+// ============================================================================
+// Transformation Constants
+// ============================================================================
 
 // Direct transformation constants
 export const DIRECT_TRANSFORMATION: Transformation = {
@@ -98,14 +110,6 @@ export const INDIRECT_CONDITION: Transformation = {
   masking: false,
 };
 
-function createTransformation(
-  type: TransformationType,
-  subtype: TransformationSubtype,
-  masking: boolean = false,
-): Transformation {
-  return { type, subtype, masking };
-}
-
 function mergeTransformations(parent: Transformation | undefined, child: Transformation): Transformation {
   if (!parent) {
     return child;
@@ -149,6 +153,10 @@ class TransformationSet extends HashSet<Transformation> {
   }
 }
 
+// ============================================================================
+// Exported Types
+// ============================================================================
+
 export type Column = {
   name: string;
 };
@@ -179,6 +187,10 @@ export interface ExtendedLineageResult {
   fields: ColumnLineageDatasetFacet["fields"];
   dataset?: InputField[];
 }
+
+// ============================================================================
+// Column Name Utilities
+// ============================================================================
 
 export function isColumn(selectColumn: Select["columns"][number]): selectColumn is AstColumn {
   return (
@@ -307,8 +319,63 @@ export function extractColumnRefs(expr: ExpressionValue | null | undefined): Col
   return refs;
 }
 
+// ============================================================================
+// Window Function Helpers (needed by both field-level and dataset-level lineage)
+// ============================================================================
+
 /**
- * Get transformations from expression, now supporting CASE/IF for CONDITION subtype
+ * Type for OVER clause structure (shared between aggr_func and function types)
+ */
+type OverClause = {
+  // Direct structure (legacy/simple case)
+  partitionby?: ExpressionValue[];
+  orderby?: Array<{ expr: ExpressionValue }>;
+  // Nested structure (Trino parser output)
+  as_window_specification?: {
+    window_specification?: {
+      partitionby?: Array<{ expr: ExpressionValue }>;
+      orderby?: Array<{ expr: ExpressionValue }>;
+    };
+  };
+};
+
+/**
+ * Extract expressions from an OVER clause object (PARTITION BY and ORDER BY)
+ * This is a helper used by both field-level and dataset-level lineage extraction.
+ */
+function extractWindowExpressionsFromOver(over: OverClause): ExpressionValue[] {
+  const expressions: ExpressionValue[] = [];
+
+  // Handle nested structure (Trino parser output)
+  const windowSpec = over.as_window_specification?.window_specification;
+  if (windowSpec) {
+    if (windowSpec.partitionby) {
+      expressions.push(...windowSpec.partitionby.map((item) => item.expr));
+    }
+    if (windowSpec.orderby) {
+      expressions.push(...windowSpec.orderby.map((item) => item.expr));
+    }
+  }
+
+  // Handle direct structure (legacy/simple case) as fallback
+  if (expressions.length === 0) {
+    if (over.partitionby) {
+      expressions.push(...over.partitionby);
+    }
+    if (over.orderby) {
+      expressions.push(...over.orderby.map((item) => item.expr));
+    }
+  }
+
+  return expressions;
+}
+
+// ============================================================================
+// Direct Transformation Extraction
+// ============================================================================
+
+/**
+ * Get transformations from expression, supporting CASE/IF for CONDITION subtype
  */
 export function getDirectTransformationsFromExprValue(
   expr: ExpressionValue,
@@ -354,40 +421,79 @@ export function getDirectTransformationsFromExprValue(
     case "aggr_func": {
       const aggExpr = expr as AggrFunc;
 
-      return getDirectTransformationsFromExprValue(
-        aggExpr.args.expr,
-        mergeTransformations(parentTransformation, {
-          ...DIRECT_AGGREGATION,
-          masking: MASKING_AGG_FUNCTIONS.has(aggExpr.name),
-        }),
-      );
+      const merged: Record<string, TransformationSet> = {};
+      
+      // Extract lineage from aggregate function arguments
+      if (aggExpr.args?.expr) {
+        const argTransformations = getDirectTransformationsFromExprValue(
+          aggExpr.args.expr,
+          mergeTransformations(parentTransformation, {
+            ...DIRECT_AGGREGATION,
+            masking: MASKING_AGG_FUNCTIONS.has(aggExpr.name),
+          }),
+        );
+        Object.entries(argTransformations).forEach(([key, value]) => {
+          merged[key] = merged[key] ? merged[key].union(value) : value;
+        });
+      }
+
+      // For window functions (aggr_func with OVER clause), also extract columns from PARTITION BY/ORDER BY
+      if ("over" in aggExpr && aggExpr.over) {
+        const windowExprs = extractWindowExpressionsFromOver(aggExpr.over);
+        for (const windowExpr of windowExprs) {
+          const windowTransformations = getDirectTransformationsFromExprValue(
+            windowExpr,
+            mergeTransformations(parentTransformation, DIRECT_AGGREGATION),
+          );
+          Object.entries(windowTransformations).forEach(([key, value]) => {
+            merged[key] = merged[key] ? merged[key].union(value) : value;
+          });
+        }
+      }
+
+      return merged;
     }
 
     case "function": {
       const funcExpr = expr as AstFunction;
+      const merged: Record<string, TransformationSet> = {};
 
-      return (
-        funcExpr.args?.value.reduce(
-          (acc, arg) => {
-            const argTransformations = getDirectTransformationsFromExprValue(
-              arg,
-              mergeTransformations(parentTransformation, {
-                ...DIRECT_TRANSFORMATION,
-                masking:
-                  funcExpr.name.name.length > 0 &&
-                  MASKING_FUNCTIONS.has(funcExpr.name.name.at(-1)!.value.toUpperCase()),
-              }),
-            );
+      // Extract lineage from function arguments
+      if (funcExpr.args?.value) {
+        for (const arg of funcExpr.args.value) {
+          const argTransformations = getDirectTransformationsFromExprValue(
+            arg,
+            mergeTransformations(parentTransformation, {
+              ...DIRECT_TRANSFORMATION,
+              masking:
+                funcExpr.name.name.length > 0 &&
+                MASKING_FUNCTIONS.has(funcExpr.name.name.at(-1)!.value.toUpperCase()),
+            }),
+          );
+          Object.entries(argTransformations).forEach(([key, value]) => {
+            merged[key] = merged[key] ? merged[key].union(value) : value;
+          });
+        }
+      }
 
-            Object.entries(argTransformations).forEach(([key, value]) => {
-              acc[key] = acc[key] ? acc[key].intersection(value) : value;
-            });
+      // For window functions (function with OVER clause like RANK(), ROW_NUMBER()),
+      // extract columns from PARTITION BY/ORDER BY since these functions have no arguments
+      if ("over" in funcExpr && funcExpr.over) {
+        const windowExprs = extractWindowExpressionsFromOver(
+          (funcExpr as AstFunction & { over: OverClause }).over,
+        );
+        for (const windowExpr of windowExprs) {
+          const windowTransformations = getDirectTransformationsFromExprValue(
+            windowExpr,
+            mergeTransformations(parentTransformation, DIRECT_TRANSFORMATION),
+          );
+          Object.entries(windowTransformations).forEach(([key, value]) => {
+            merged[key] = merged[key] ? merged[key].union(value) : value;
+          });
+        }
+      }
 
-            return acc;
-          },
-          {} as Record<string, TransformationSet>,
-        ) ?? {}
-      );
+      return merged;
     }
 
     case "case": {
@@ -469,53 +575,108 @@ export function getIndirectTransformationsFromExpr(
   return result;
 }
 
+// ============================================================================
+// Indirect Lineage Extraction Helpers
+// ============================================================================
+
 /**
- * Extract JOIN lineage from FROM clause
+ * Resolves a column reference to an InputField by finding the matching table in schema.
+ * This is the core helper that eliminates repetitive table lookup logic.
  */
-export function getJoinLineage(select: Select, schema: Schema): InputField[] {
+function resolveColumnRefToInputField(
+  ref: ColumnRefItem,
+  regularTables: BaseFrom[],
+  schema: Schema,
+  transformation: Transformation,
+): InputField | null {
+  const columnName = getInputColumnName(ref);
+  const tableName = ref.table;
+
+  if (!columnName) return null;
+
+  const table = regularTables.find(
+    (t) =>
+      (!tableName || tableName === t.table || tableName === t.as) &&
+      schema.tables.some((s) => s.name === t.table && s.columns.includes(columnName)),
+  );
+
+  if (!table) return null;
+
+  const schemaTable = schema.tables.find((s) => s.name === table.table);
+  if (!schemaTable) return null;
+
+  return {
+    namespace: schema.namespace,
+    name: schemaTable.name,
+    field: columnName,
+    transformations: [transformation],
+  };
+}
+
+/**
+ * Extracts InputFields from column references in an expression.
+ * Common pattern used by WHERE, HAVING, GROUP BY, ORDER BY, etc.
+ */
+function extractInputFieldsFromExpression(
+  expr: ExpressionValue | null | undefined,
+  regularTables: BaseFrom[],
+  schema: Schema,
+  transformation: Transformation,
+): InputField[] {
+  if (!expr) return [];
+
+  const columnRefs = extractColumnRefs(expr);
   const inputFields: InputField[] = [];
 
-  if (!select.from) return inputFields;
+  for (const ref of columnRefs) {
+    const inputField = resolveColumnRefToInputField(ref, regularTables, schema, transformation);
+    if (inputField) {
+      inputFields.push(inputField);
+    }
+  }
+
+  return inputFields;
+}
+
+/**
+ * Extracts InputFields from multiple expressions.
+ */
+function extractInputFieldsFromExpressions(
+  expressions: (ExpressionValue | null | undefined)[],
+  regularTables: BaseFrom[],
+  schema: Schema,
+  transformation: Transformation,
+): InputField[] {
+  return expressions.flatMap((expr) =>
+    extractInputFieldsFromExpression(expr, regularTables, schema, transformation),
+  );
+}
+
+// ============================================================================
+// Clause-Specific Lineage Extractors
+// ============================================================================
+
+/**
+ * Extract JOIN lineage from FROM clause (ON and USING conditions)
+ */
+export function getJoinLineage(select: Select, schema: Schema): InputField[] {
+  if (!select.from) return [];
 
   const fromItems = Array.isArray(select.from) ? select.from : [select.from];
   const { regularTables } = getTableExpressionsFromSelect(select);
+  const inputFields: InputField[] = [];
 
   for (const item of fromItems) {
-    // Check for JOIN conditions
+    // Handle ON clause
     if ("on" in item && item.on) {
-      const columnRefs = extractColumnRefs(item.on as ExpressionValue);
-
-      for (const ref of columnRefs) {
-        const columnName = getInputColumnName(ref);
-        const tableName = ref.table;
-
-        if (columnName) {
-          // Find the table - tableName might be an alias, so check against both table name and alias
-          const table = regularTables.find(
-            (t) =>
-              (!tableName || tableName === t.table || tableName === t.as) &&
-              schema.tables.some((s) => s.name === t.table && s.columns.includes(columnName)),
-          );
-
-          if (table) {
-            const schemaTable = schema.tables.find((s) => s.name === table.table);
-            if (schemaTable) {
-              inputFields.push({
-                namespace: schema.namespace,
-                name: schemaTable.name,
-                field: columnName,
-                transformations: [INDIRECT_JOIN],
-              });
-            }
-          }
-        }
-      }
+      inputFields.push(
+        ...extractInputFieldsFromExpression(item.on as ExpressionValue, regularTables, schema, INDIRECT_JOIN),
+      );
     }
 
-    // Check for USING clause
+    // Handle USING clause - columns exist in multiple tables
     if ("using" in item && Array.isArray(item.using)) {
       for (const usingCol of item.using) {
-        // USING columns exist in multiple tables
         for (const schemaTable of schema.tables) {
           if (schemaTable.columns.includes(usingCol)) {
             inputFields.push({
@@ -537,269 +698,101 @@ export function getJoinLineage(select: Select, schema: Schema): InputField[] {
  * Extract WHERE clause lineage (FILTER)
  */
 export function getFilterLineage(select: Select, schema: Schema): InputField[] {
-  const inputFields: InputField[] = [];
+  if (!select.where) return [];
 
-  if (!select.where) return inputFields;
-
-  const columnRefs = extractColumnRefs(select.where as ExpressionValue);
   const { regularTables } = getTableExpressionsFromSelect(select);
-
-  for (const ref of columnRefs) {
-    const columnName = getInputColumnName(ref);
-    const tableName = ref.table;
-
-    if (columnName) {
-      // Find the table in schema
-      const table = regularTables.find(
-        (t) =>
-          (!tableName || tableName === t.table || tableName === t.as) &&
-          schema.tables.some((s) => s.name === t.table && s.columns.includes(columnName)),
-      );
-
-      if (table) {
-        const schemaTable = schema.tables.find((s) => s.name === table.table);
-        if (schemaTable) {
-          inputFields.push({
-            namespace: schema.namespace,
-            name: schemaTable.name,
-            field: columnName,
-            transformations: [INDIRECT_FILTER],
-          });
-        }
-      }
-    }
-  }
-
-  return inputFields;
+  return extractInputFieldsFromExpression(select.where as ExpressionValue, regularTables, schema, INDIRECT_FILTER);
 }
 
 /**
  * Extract GROUP BY lineage
  */
 export function getGroupByLineage(select: Select, schema: Schema): InputField[] {
-  const inputFields: InputField[] = [];
+  if (!select.groupby) return [];
 
-  if (!select.groupby) return inputFields;
-
-  // Handle both array format and object with columns property
-  let groupByItems: ExpressionValue[];
-  if (Array.isArray(select.groupby)) {
-    groupByItems = select.groupby;
-  } else if (
-    typeof select.groupby === "object" &&
-    "columns" in select.groupby &&
-    Array.isArray(select.groupby.columns)
-  ) {
-    groupByItems = select.groupby.columns;
-  } else {
-    groupByItems = [select.groupby as unknown as ExpressionValue];
-  }
+  // Normalize GROUP BY to array format
+  const groupByItems = normalizeGroupByItems(select.groupby);
   const { regularTables } = getTableExpressionsFromSelect(select);
 
-  for (const item of groupByItems) {
-    const columnRefs = extractColumnRefs(item as ExpressionValue);
+  return extractInputFieldsFromExpressions(groupByItems, regularTables, schema, INDIRECT_GROUP_BY);
+}
 
-    for (const ref of columnRefs) {
-      const columnName = getInputColumnName(ref);
-      const tableName = ref.table;
-
-      if (columnName) {
-        const table = regularTables.find(
-          (t) =>
-            (!tableName || tableName === t.table || tableName === t.as) &&
-            schema.tables.some((s) => s.name === t.table && s.columns.includes(columnName)),
-        );
-
-        if (table) {
-          const schemaTable = schema.tables.find((s) => s.name === table.table);
-          if (schemaTable) {
-            inputFields.push({
-              namespace: schema.namespace,
-              name: schemaTable.name,
-              field: columnName,
-              transformations: [INDIRECT_GROUP_BY],
-            });
-          }
-        }
-      }
-    }
+/**
+ * Normalize GROUP BY clause to array of ExpressionValue
+ */
+function normalizeGroupByItems(groupby: Select["groupby"]): ExpressionValue[] {
+  if (Array.isArray(groupby)) {
+    return groupby;
   }
-
-  return inputFields;
+  if (typeof groupby === "object" && groupby && "columns" in groupby && Array.isArray(groupby.columns)) {
+    return groupby.columns;
+  }
+  return [groupby as unknown as ExpressionValue];
 }
 
 /**
  * Extract ORDER BY lineage (SORT)
  */
 export function getOrderByLineage(select: Select, schema: Schema): InputField[] {
-  const inputFields: InputField[] = [];
-
-  if (!select.orderby) return inputFields;
+  if (!select.orderby) return [];
 
   const orderByItems = Array.isArray(select.orderby) ? select.orderby : [select.orderby];
   const { regularTables } = getTableExpressionsFromSelect(select);
 
-  for (const item of orderByItems) {
-    const expr = "expr" in item ? item.expr : item;
-    const columnRefs = extractColumnRefs(expr as ExpressionValue);
-
-    for (const ref of columnRefs) {
-      const columnName = getInputColumnName(ref);
-      const tableName = ref.table;
-
-      if (columnName) {
-        const table = regularTables.find(
-          (t) =>
-            (!tableName || tableName === t.table || tableName === t.as) &&
-            schema.tables.some((s) => s.name === t.table && s.columns.includes(columnName)),
-        );
-
-        if (table) {
-          const schemaTable = schema.tables.find((s) => s.name === table.table);
-          if (schemaTable) {
-            inputFields.push({
-              namespace: schema.namespace,
-              name: schemaTable.name,
-              field: columnName,
-              transformations: [INDIRECT_SORT],
-            });
-          }
-        }
-      }
-    }
-  }
-
-  return inputFields;
+  const expressions = orderByItems.map((item) => ("expr" in item ? item.expr : item) as ExpressionValue);
+  return extractInputFieldsFromExpressions(expressions, regularTables, schema, INDIRECT_SORT);
 }
 
 /**
- * Extract WINDOW function lineage from SELECT columns
+ * Extract WINDOW function lineage from SELECT columns (PARTITION BY and ORDER BY in OVER clause)
  */
 export function getWindowLineage(select: Select, schema: Schema): InputField[] {
-  const inputFields: InputField[] = [];
-  const { regularTables } = getTableExpressionsFromSelect(select);
+  if (!select.columns || (typeof select.columns === "string" && select.columns === "*")) {
+    return [];
+  }
 
-  if (!select.columns || (typeof select.columns === "string" && select.columns === "*")) return inputFields;
+  const { regularTables } = getTableExpressionsFromSelect(select);
+  const inputFields: InputField[] = [];
 
   for (const col of select.columns) {
     if (!isColumn(col)) continue;
 
-    // Check if this is a window function (has OVER clause)
-    const expr = col.expr;
-    if (expr.type === "aggr_func" && "over" in expr && (expr as AggrFunc & { over?: unknown }).over) {
-      const aggrFunc = expr as AggrFunc & {
-        over?: {
-          partitionby?: ExpressionValue[];
-          orderby?: Array<{ expr: ExpressionValue }>;
-        };
-      };
-
-      // Extract PARTITION BY columns
-      if (aggrFunc.over?.partitionby) {
-        for (const partExpr of aggrFunc.over.partitionby) {
-          const columnRefs = extractColumnRefs(partExpr);
-          for (const ref of columnRefs) {
-            const columnName = getInputColumnName(ref);
-            const tableName = ref.table;
-
-            if (columnName) {
-              const table = regularTables.find(
-                (t) =>
-                  (!tableName || tableName === t.table || tableName === t.as) &&
-                  schema.tables.some((s) => s.name === t.table && s.columns.includes(columnName)),
-              );
-
-              if (table) {
-                const schemaTable = schema.tables.find((s) => s.name === table.table);
-                if (schemaTable) {
-                  inputFields.push({
-                    namespace: schema.namespace,
-                    name: schemaTable.name,
-                    field: columnName,
-                    transformations: [INDIRECT_WINDOW],
-                  });
-                }
-              }
-            }
-          }
-        }
-      }
-
-      // Extract ORDER BY within OVER clause
-      if (aggrFunc.over?.orderby) {
-        for (const orderItem of aggrFunc.over.orderby) {
-          const columnRefs = extractColumnRefs(orderItem.expr);
-          for (const ref of columnRefs) {
-            const columnName = getInputColumnName(ref);
-            const tableName = ref.table;
-
-            if (columnName) {
-              const table = regularTables.find(
-                (t) =>
-                  (!tableName || tableName === t.table || tableName === t.as) &&
-                  schema.tables.some((s) => s.name === t.table && s.columns.includes(columnName)),
-              );
-
-              if (table) {
-                const schemaTable = schema.tables.find((s) => s.name === table.table);
-                if (schemaTable) {
-                  inputFields.push({
-                    namespace: schema.namespace,
-                    name: schemaTable.name,
-                    field: columnName,
-                    transformations: [INDIRECT_WINDOW],
-                  });
-                }
-              }
-            }
-          }
-        }
-      }
-    }
+    const windowExprs = extractWindowExpressions(col.expr);
+    inputFields.push(...extractInputFieldsFromExpressions(windowExprs, regularTables, schema, INDIRECT_WINDOW));
   }
 
   return inputFields;
 }
 
 /**
- * Extract HAVING clause lineage (combines FILTER with AGGREGATION context)
+ * Extract expressions from OVER clause in an expression (PARTITION BY and ORDER BY)
+ * Handles the parser structure: over.as_window_specification.window_specification.{partitionby,orderby}
+ * Supports both aggr_func (e.g., SUM() OVER) and function types (e.g., ROW_NUMBER() OVER)
+ */
+function extractWindowExpressions(expr: ExpressionValue): ExpressionValue[] {
+  // Support both aggr_func and function types with OVER clause
+  if ((expr.type !== "aggr_func" && expr.type !== "function") || !("over" in expr)) return [];
+
+  const exprWithOver = expr as (AggrFunc | AstFunction) & { over?: OverClause };
+
+  if (!exprWithOver.over) return [];
+
+  return extractWindowExpressionsFromOver(exprWithOver.over);
+}
+
+/**
+ * Extract HAVING clause lineage (FILTER in aggregation context)
  */
 export function getHavingLineage(select: Select, schema: Schema): InputField[] {
-  const inputFields: InputField[] = [];
+  if (!select.having) return [];
 
-  if (!select.having) return inputFields;
-
-  // TODO - check type
-  const columnRefs = extractColumnRefs(select.having as unknown as ExpressionValue);
   const { regularTables } = getTableExpressionsFromSelect(select);
-
-  for (const ref of columnRefs) {
-    const columnName = getInputColumnName(ref);
-    const tableName = ref.table;
-
-    if (columnName) {
-      const table = regularTables.find(
-        (t) =>
-          (!tableName || tableName === t.table || tableName === t.as) &&
-          schema.tables.some((s) => s.name === t.table && s.columns.includes(columnName)),
-      );
-
-      if (table) {
-        const schemaTable = schema.tables.find((s) => s.name === table.table);
-        if (schemaTable) {
-          inputFields.push({
-            namespace: schema.namespace,
-            name: schemaTable.name,
-            field: columnName,
-            transformations: [INDIRECT_FILTER],
-          });
-        }
-      }
-    }
-  }
-
-  return inputFields;
+  return extractInputFieldsFromExpression(select.having as unknown as ExpressionValue, regularTables, schema, INDIRECT_FILTER);
 }
+
+// ============================================================================
+// Table Expression Helpers
+// ============================================================================
 
 export function getTableExpressionsFromSelect(select: Select): {
   regularTables: BaseFrom[];
@@ -866,6 +859,10 @@ export function mergeTransformationSet(parent: TransformationSet, child: Transfo
   return merged;
 }
 
+// ============================================================================
+// Main Lineage Functions
+// ============================================================================
+
 export function getColumnLineage(
   select: Select,
   schema: Schema,
@@ -895,7 +892,7 @@ export function getColumnLineage(
     const table = regularTables.find(
       (t) =>
         (!inputColumn.table || inputColumn.table === t.table || inputColumn.table === t.as) &&
-        schema.tables.some((s) => s.name === t.table && s.columns.some((c) => c === inputColumn.name)),
+        schema.tables.some((s) => s.name === t.table && s.columns.includes(inputColumn.name)),
     );
 
     if (table) {
@@ -938,17 +935,24 @@ export function getColumnLineage(
 
 /**
  * Get all dataset-level indirect lineage (columns that affect the entire result set)
+ * This includes lineage from CTEs and subqueries that contribute to the final result.
  */
 export function getDatasetLineage(select: Select, schema: Schema): InputField[] {
   const allIndirectFields: InputField[] = [];
 
-  // Collect all indirect lineage
+  // Collect all indirect lineage from the outermost SELECT
   allIndirectFields.push(...getJoinLineage(select, schema));
   allIndirectFields.push(...getFilterLineage(select, schema));
   allIndirectFields.push(...getGroupByLineage(select, schema));
   allIndirectFields.push(...getOrderByLineage(select, schema));
   allIndirectFields.push(...getWindowLineage(select, schema));
   allIndirectFields.push(...getHavingLineage(select, schema));
+
+  // Recursively collect dataset lineage from CTEs and subqueries
+  const { selectTables } = getTableExpressionsFromSelect(select);
+  for (const selectTable of selectTables) {
+    allIndirectFields.push(...getDatasetLineage(selectTable, schema));
+  }
 
   // Deduplicate by creating a map keyed by namespace.table.field.type.subtype
   const deduped = new Map<string, InputField>();

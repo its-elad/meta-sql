@@ -1,13 +1,12 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { GitBranch, Github } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@meta-sql/ui";
 import { SQLEditor } from "./components/editor";
 import { LineageGraph } from "./components/lineage/LineageGraph";
-import type { ColumnLineageDatasetFacet } from "@meta-sql/open-lineage";
-import type { Schema } from "@meta-sql/lineage";
+import type { getExtendedLineage, Schema } from "@meta-sql/lineage";
 
 // Use the actual return type from getLineage
-type LineageResult = ColumnLineageDatasetFacet["fields"];
+type LineageResult = ReturnType<typeof getExtendedLineage>;
 
 // Default schema matching the sample queries
 const defaultSchema: Schema = {
@@ -15,15 +14,7 @@ const defaultSchema: Schema = {
   tables: [
     {
       name: "product_sales",
-      columns: [
-        "id",
-        "product_id",
-        "quantity_sold",
-        "unit_price",
-        "sale_date",
-        "store_id",
-        "discount_percentage",
-      ],
+      columns: ["id", "product_id", "quantity_sold", "unit_price", "sale_date", "store_id", "discount_percentage"],
     },
     {
       name: "stores",
@@ -56,6 +47,8 @@ export default function App() {
     setLineageData(lineageResult);
   }, []);
 
+  useEffect(() => console.log(lineageData), [lineageData]);
+
   return (
     <div className="min-h-screen bg-background font-[DM Sans]">
       {/* Header */}
@@ -64,9 +57,7 @@ export default function App() {
           <div className="flex items-center gap-3">
             <div className="flex items-center gap-2">
               <GitBranch className="h-6 w-6 text-main" />
-              <h1 className="text-xl font-bold text-foreground">
-                @meta-sql/lineage
-              </h1>
+              <h1 className="text-xl font-bold text-foreground">@meta-sql/lineage</h1>
             </div>
             <div className="hidden md:block text-sm text-foreground/70">
               Interactive Demo - SQL Column Lineage Analysis Package
@@ -96,22 +87,14 @@ export default function App() {
             <CardTitle>SQL Editor</CardTitle>
           </CardHeader>
           <CardContent className="h-[calc(100%-theme(spacing.20))]">
-            <SQLEditor
-              onQueryParsed={handleQueryParsed}
-              schema={schema}
-              className="h-full"
-            />
+            <SQLEditor onQueryParsed={handleQueryParsed} schema={schema} className="h-full" />
           </CardContent>
         </Card>
 
         {/* Right Panel - Lineage Graph */}
         <Card className="flex-1 bg-secondary-background shadow-shadow relative">
           <CardContent className="absolute inset-0 p-0">
-            <LineageGraph
-              lineageData={lineageData || {}}
-              schema={schema}
-              className="h-full w-full"
-            />
+            <LineageGraph lineageData={lineageData?.fields || {}} schema={schema} className="h-full w-full" />
           </CardContent>
           <CardHeader className="relative z-  10 bg-transparent">
             <CardTitle>Data Lineage Graph</CardTitle>

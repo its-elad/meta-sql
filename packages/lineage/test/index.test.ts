@@ -48,9 +48,7 @@ describe("Select Lineage", () => {
     FROM u
     `;
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [
-      createTable("users", ["id", "name", "email"]),
-    ]);
+    const schema = createSchema("trino", [createTable("users", ["id", "name", "email"])]);
 
     const lineage = getLineage(ast as Select, schema);
 
@@ -88,9 +86,7 @@ describe("Select Lineage", () => {
                   name as wow
                 FROM (SELECT * FROM u) AS t`;
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [
-      createTable("users", ["id", "name", "email"]),
-    ]);
+    const schema = createSchema("trino", [createTable("users", ["id", "name", "email"])]);
 
     const lineage = getLineage(ast as Select, schema);
 
@@ -190,9 +186,7 @@ describe("Select Lineage", () => {
             name: "orders",
             namespace: "trino",
             field: "user_id",
-            transformations: [
-              { type: "DIRECT", subtype: "AGGREGATION", masking: true },
-            ],
+            transformations: [{ type: "DIRECT", subtype: "AGGREGATION", masking: true }],
           },
         ],
       },
@@ -358,9 +352,7 @@ ORDER BY net_revenue DESC`;
     `;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [
-      createTable("users", ["id", "name", "email"]),
-    ]);
+    const schema = createSchema("trino", [createTable("users", ["id", "name", "email"])]);
 
     const lineage = getLineage(ast as Select, schema);
 
@@ -394,9 +386,7 @@ ORDER BY net_revenue DESC`;
       GROUP BY country`;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [
-      createTable("cities", ["country", "city"]),
-    ]);
+    const schema = createSchema("trino", [createTable("cities", ["country", "city"])]);
 
     const lineage = getLineage(ast as Select, schema);
 
@@ -417,9 +407,7 @@ ORDER BY net_revenue DESC`;
             name: "cities",
             namespace: "trino",
             field: "city",
-            transformations: [
-              { type: "DIRECT", subtype: "AGGREGATION", masking: true },
-            ],
+            transformations: [{ type: "DIRECT", subtype: "AGGREGATION", masking: true }],
           },
         ],
       },
@@ -431,9 +419,7 @@ ORDER BY net_revenue DESC`;
       FROM users`;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [
-      createTable("users", ["id", "name"]),
-    ]);
+    const schema = createSchema("trino", [createTable("users", ["id", "name"])]);
 
     const lineage = getLineage(ast as Select, schema);
 
@@ -517,9 +503,7 @@ ORDER BY net_revenue DESC`;
     FROM users`;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [
-      createTable("users", ["id", "name", "email"]),
-    ]);
+    const schema = createSchema("trino", [createTable("users", ["id", "name", "email"])]);
 
     const lineage = getLineage(ast as Select, schema);
 
@@ -583,9 +567,7 @@ ORDER BY net_revenue DESC`;
     FROM orders`;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [
-      createTable("orders", ["id", "price", "tax", "quantity", "discount"]),
-    ]);
+    const schema = createSchema("trino", [createTable("orders", ["id", "price", "tax", "quantity", "discount"])]);
 
     const lineage = getLineage(ast as Select, schema);
 
@@ -681,9 +663,7 @@ ORDER BY net_revenue DESC`;
     FROM orders`;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [
-      createTable("orders", ["id", "price", "tax", "quantity", "discount"]),
-    ]);
+    const schema = createSchema("trino", [createTable("orders", ["id", "price", "tax", "quantity", "discount"])]);
 
     const lineage = getLineage(ast as Select, schema);
 
@@ -749,9 +729,7 @@ ORDER BY net_revenue DESC`;
     GROUP BY country`;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [
-      createTable("cities", ["country", "city", "population", "area"]),
-    ]);
+    const schema = createSchema("trino", [createTable("cities", ["country", "city", "population", "area"])]);
 
     const lineage = getLineage(ast as Select, schema);
 

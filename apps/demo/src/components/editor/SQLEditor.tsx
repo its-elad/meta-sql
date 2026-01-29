@@ -12,21 +12,14 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@meta-sql/ui";
-import {
-  FileText,
-  AlertCircle,
-  CheckCircle,
-  CheckIcon,
-  ChevronsUpDown,
-} from "lucide-react";
-import { getLineage, type Schema } from "@meta-sql/lineage";
-import type { ColumnLineageDatasetFacet } from "@meta-sql/open-lineage";
+import { FileText, AlertCircle, CheckCircle, CheckIcon, ChevronsUpDown } from "lucide-react";
+import { getExtendedLineage, type Schema } from "@meta-sql/lineage";
 import { Parser } from "node-sql-parser";
 import { sampleQueries, type SupportedDialect } from "./sampleQueries.js";
 import { cn } from "@meta-sql/ui/lib/utils";
 
 // Use the actual return type from getLineage
-type LineageResult = ColumnLineageDatasetFacet["fields"];
+type LineageResult = ReturnType<typeof getExtendedLineage>;
 
 const dialectOptions = [
   {
@@ -56,20 +49,12 @@ const dialectOptions = [
 ] satisfies Array<{ value: SupportedDialect; label: string }>;
 
 interface SQLEditorProps {
-  onQueryParsed: (
-    lineageResult: LineageResult,
-    query: string,
-    dialect: string
-  ) => void;
+  onQueryParsed: (lineageResult: LineageResult, query: string, dialect: string) => void;
   schema?: Schema;
   className?: string;
 }
 
-export const SQLEditor: React.FC<SQLEditorProps> = ({
-  onQueryParsed,
-  schema,
-  className = "",
-}) => {
+export const SQLEditor: React.FC<SQLEditorProps> = ({ onQueryParsed, schema, className = "" }) => {
   const [query, setQuery] = useState("");
   const [dialect, setDialect] = useState<SupportedDialect>("mysql");
   const [open, setOpen] = useState(false);
@@ -96,7 +81,7 @@ export const SQLEditor: React.FC<SQLEditorProps> = ({
             };
 
             // Get column lineage and update the graph
-            const lineageResult = getLineage(firstStatement, lineageSchema);
+            const lineageResult = getExtendedLineage(firstStatement, lineageSchema);
 
             onQueryParsed(lineageResult, query, dialect);
 
@@ -104,9 +89,7 @@ export const SQLEditor: React.FC<SQLEditorProps> = ({
           } else {
             setValidationResult({
               isValid: false,
-              errors: [
-                "Only SELECT statements are supported for lineage analysis",
-              ],
+              errors: ["Only SELECT statements are supported for lineage analysis"],
             });
           }
         } else {
@@ -120,9 +103,7 @@ export const SQLEditor: React.FC<SQLEditorProps> = ({
 
         setValidationResult({
           isValid: false,
-          errors: [
-            error instanceof Error ? error.message : "Unknown parsing error",
-          ],
+          errors: [error instanceof Error ? error.message : "Unknown parsing error"],
         });
       }
     } else {
@@ -152,10 +133,7 @@ export const SQLEditor: React.FC<SQLEditorProps> = ({
                   aria-expanded={open}
                   className="w-[200px] justify-between"
                 >
-                  {dialect
-                    ? dialectOptions.find((option) => option.value === dialect)
-                        ?.label
-                    : "Select dialect..."}
+                  {dialect ? dialectOptions.find((option) => option.value === dialect)?.label : "Select dialect..."}
                   <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
                 </Button>
               </PopoverTrigger>
@@ -175,12 +153,7 @@ export const SQLEditor: React.FC<SQLEditorProps> = ({
                           }}
                         >
                           <CheckIcon
-                            className={cn(
-                              "mr-2 h-4 w-4",
-                              dialect === option.value
-                                ? "opacity-100"
-                                : "opacity-0"
-                            )}
+                            className={cn("mr-2 h-4 w-4", dialect === option.value ? "opacity-100" : "opacity-0")}
                           />
                           {option.label}
                         </CommandItem>
@@ -248,11 +221,7 @@ export const SQLEditor: React.FC<SQLEditorProps> = ({
               </Badge>
               <div className="flex flex-col gap-1">
                 {validationResult.errors.map((error, index) => (
-                  <Badge
-                    key={index}
-                    variant="neutral"
-                    className="text-wrap text-ellipsis inline max-w-3xl"
-                  >
+                  <Badge key={index} variant="neutral" className="text-wrap text-ellipsis inline max-w-3xl">
                     {error}
                   </Badge>
                 ))}

@@ -5,10 +5,7 @@ export class HashSet<T> implements Set<T> {
   constructor(hasher?: (value: T) => string) {
     this.hasher = hasher || ((value: T) => JSON.stringify(value));
   }
-  forEach(
-    callbackfn: (value: T, value2: T, set: Set<T>) => void,
-    thisArg?: unknown
-  ): void {
+  forEach(callbackfn: (value: T, value2: T, set: Set<T>) => void, thisArg?: unknown): void {
     this.map.forEach((value) => {
       callbackfn.call(thisArg, value, value, this);
     });
@@ -62,5 +59,16 @@ export class HashSet<T> implements Set<T> {
       }
     }
     return intersection;
+  }
+
+  union(other: Set<T>): HashSet<T> {
+    const union = new HashSet<T>(this.hasher);
+    for (const value of this) {
+      union.add(value);
+    }
+    for (const value of other) {
+      union.add(value);
+    }
+    return union;
   }
 }

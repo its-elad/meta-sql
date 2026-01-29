@@ -514,7 +514,7 @@ export function getDirectTransformationsFromExprValue(
           if (arg.result) {
             const resultTransformations = getDirectTransformationsFromExprValue(
               arg.result,
-              mergeTransformations(parentTransformation, DIRECT_TRANSFORMATION),
+              mergeTransformations(parentTransformation, DIRECT_IDENTITY),
             );
             Object.entries(resultTransformations).forEach(([key, value]) => {
               merged[key] = merged[key] ? merged[key].union(value) : value;

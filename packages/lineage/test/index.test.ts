@@ -3,7 +3,7 @@ import { Parser } from "node-sql-parser";
 import type { AST, Select } from "node-sql-parser";
 import {
   getLineage,
-  type Schema,
+  type Namespace,
   type Table,
   DIRECT_AGGREGATION,
   DIRECT_IDENTITY,
@@ -12,9 +12,9 @@ import {
 
 const parser = new Parser();
 
-// Helper function to create schemas
-function createSchema(namespace: string, tables: Table[]): Schema {
-  return { namespace, tables };
+// Helper function to create namespaces
+function createNamespace(namespace: string, tables: Table[], defaultSchema?: string): Namespace {
+  return { namespace, tables, defaultSchema };
 }
 
 function createTable(name: string, columns: string[]): Table {
@@ -48,7 +48,7 @@ describe("Select Lineage", () => {
     FROM u
     `;
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [createTable("users", ["id", "name", "email"])]);
+    const schema = createNamespace("trino", [createTable("users", ["id", "name", "email"])]);
 
     const lineage = getLineage(ast as Select, schema);
 
@@ -86,7 +86,7 @@ describe("Select Lineage", () => {
                   name as wow
                 FROM (SELECT * FROM u) AS t`;
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [createTable("users", ["id", "name", "email"])]);
+    const schema = createNamespace("trino", [createTable("users", ["id", "name", "email"])]);
 
     const lineage = getLineage(ast as Select, schema);
 
@@ -152,7 +152,7 @@ describe("Select Lineage", () => {
     `;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [
+    const schema = createNamespace("trino", [
       createTable("users", ["id", "name", "email", "status"]),
       createTable("orders", ["id", "user_id", "total"]),
     ]);
@@ -247,7 +247,7 @@ FROM final_report
 ORDER BY net_revenue DESC`;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [
+    const schema = createNamespace("trino", [
       createTable("product_sales", [
         "product_id",
         "store_id",
@@ -352,7 +352,7 @@ ORDER BY net_revenue DESC`;
     `;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [createTable("users", ["id", "name", "email"])]);
+    const schema = createNamespace("trino", [createTable("users", ["id", "name", "email"])]);
 
     const lineage = getLineage(ast as Select, schema);
 
@@ -386,7 +386,7 @@ ORDER BY net_revenue DESC`;
       GROUP BY country`;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [createTable("cities", ["country", "city"])]);
+    const schema = createNamespace("trino", [createTable("cities", ["country", "city"])]);
 
     const lineage = getLineage(ast as Select, schema);
 
@@ -419,7 +419,7 @@ ORDER BY net_revenue DESC`;
       FROM users`;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [createTable("users", ["id", "name"])]);
+    const schema = createNamespace("trino", [createTable("users", ["id", "name"])]);
 
     const lineage = getLineage(ast as Select, schema);
 
@@ -463,7 +463,7 @@ ORDER BY net_revenue DESC`;
       JOIN orders o ON u.id = o.user_id`;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [
+    const schema = createNamespace("trino", [
       createTable("users", ["id", "name", "email"]),
       createTable("orders", ["id", "user_id", "total"]),
     ]);
@@ -503,7 +503,7 @@ ORDER BY net_revenue DESC`;
     FROM users`;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [createTable("users", ["id", "name", "email"])]);
+    const schema = createNamespace("trino", [createTable("users", ["id", "name", "email"])]);
 
     const lineage = getLineage(ast as Select, schema);
 
@@ -567,7 +567,7 @@ ORDER BY net_revenue DESC`;
     FROM orders`;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [createTable("orders", ["id", "price", "tax", "quantity", "discount"])]);
+    const schema = createNamespace("trino", [createTable("orders", ["id", "price", "tax", "quantity", "discount"])]);
 
     const lineage = getLineage(ast as Select, schema);
 
@@ -663,7 +663,7 @@ ORDER BY net_revenue DESC`;
     FROM orders`;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [createTable("orders", ["id", "price", "tax", "quantity", "discount"])]);
+    const schema = createNamespace("trino", [createTable("orders", ["id", "price", "tax", "quantity", "discount"])]);
 
     const lineage = getLineage(ast as Select, schema);
 
@@ -729,7 +729,7 @@ ORDER BY net_revenue DESC`;
     GROUP BY country`;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [createTable("cities", ["country", "city", "population", "area"])]);
+    const schema = createNamespace("trino", [createTable("cities", ["country", "city", "population", "area"])]);
 
     const lineage = getLineage(ast as Select, schema);
 
@@ -780,7 +780,7 @@ ORDER BY net_revenue DESC`;
   test("select * from single table", () => {
     const sql = `SELECT * FROM users`;
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [createTable("users", ["id", "name", "email"])]);
+    const schema = createNamespace("trino", [createTable("users", ["id", "name", "email"])]);
 
     const lineage = getLineage(ast as Select, schema);
 
@@ -821,7 +821,7 @@ ORDER BY net_revenue DESC`;
   test("select * from multiple tables (JOIN)", () => {
     const sql = `SELECT * FROM users u JOIN orders o ON u.id = o.user_id`;
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [
+    const schema = createNamespace("trino", [
       createTable("users", ["id", "name"]),
       createTable("orders", ["id", "user_id", "total"]),
     ]);
@@ -877,7 +877,7 @@ ORDER BY net_revenue DESC`;
   test("select table.* from specific table", () => {
     const sql = `SELECT u.* FROM users u JOIN orders o ON u.id = o.user_id`;
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [
+    const schema = createNamespace("trino", [
       createTable("users", ["id", "name"]),
       createTable("orders", ["id", "user_id", "total"]),
     ]);
@@ -911,7 +911,7 @@ ORDER BY net_revenue DESC`;
   test("select * mixed with specific columns", () => {
     const sql = `SELECT o.*, u.name as user_name FROM users u JOIN orders o ON u.id = o.user_id`;
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [
+    const schema = createNamespace("trino", [
       createTable("users", ["id", "name"]),
       createTable("orders", ["id", "user_id", "total"]),
     ]);
@@ -970,7 +970,7 @@ ORDER BY net_revenue DESC`;
     SELECT * FROM filtered_users
     `;
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [createTable("users", ["id", "name", "active"])]);
+    const schema = createNamespace("trino", [createTable("users", ["id", "name", "active"])]);
 
     const lineage = getLineage(ast as Select, schema);
 
@@ -1001,7 +1001,7 @@ ORDER BY net_revenue DESC`;
   test("select * from nested subquery", () => {
     const sql = `SELECT * FROM (SELECT id, name FROM users) AS subq`;
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [createTable("users", ["id", "name", "email"])]);
+    const schema = createNamespace("trino", [createTable("users", ["id", "name", "email"])]);
 
     const lineage = getLineage(ast as Select, schema);
 
@@ -1050,7 +1050,7 @@ describe("Set Operations (UNION, INTERSECT, EXCEPT)", () => {
       SELECT id, name FROM customers
     `;
     const ast = parseSQLPostgres(sql);
-    const schema = createSchema("postgres", [
+    const schema = createNamespace("postgres", [
       createTable("users", ["id", "name", "email"]),
       createTable("customers", ["id", "name", "address"]),
     ]);
@@ -1094,7 +1094,7 @@ describe("Set Operations (UNION, INTERSECT, EXCEPT)", () => {
       SELECT id FROM orders
     `;
     const ast = parseSQLPostgres(sql);
-    const schema = createSchema("postgres", [
+    const schema = createNamespace("postgres", [
       createTable("users", ["id", "name"]),
       createTable("orders", ["id", "product"]),
     ]);
@@ -1123,7 +1123,7 @@ describe("Set Operations (UNION, INTERSECT, EXCEPT)", () => {
       SELECT id FROM premium_users
     `;
     const ast = parseSQLPostgres(sql);
-    const schema = createSchema("postgres", [
+    const schema = createNamespace("postgres", [
       createTable("users", ["id", "name"]),
       createTable("premium_users", ["id", "tier"]),
     ]);
@@ -1152,7 +1152,7 @@ describe("Set Operations (UNION, INTERSECT, EXCEPT)", () => {
       SELECT id FROM banned_users
     `;
     const ast = parseSQLPostgres(sql);
-    const schema = createSchema("postgres", [
+    const schema = createNamespace("postgres", [
       createTable("users", ["id", "name"]),
       createTable("banned_users", ["id", "reason"]),
     ]);
@@ -1183,7 +1183,7 @@ describe("Set Operations (UNION, INTERSECT, EXCEPT)", () => {
       SELECT id, name FROM vendors
     `;
     const ast = parseSQLPostgres(sql);
-    const schema = createSchema("postgres", [
+    const schema = createNamespace("postgres", [
       createTable("users", ["id", "name"]),
       createTable("customers", ["id", "name"]),
       createTable("vendors", ["id", "name"]),
@@ -1203,7 +1203,7 @@ describe("Set Operations (UNION, INTERSECT, EXCEPT)", () => {
       SELECT customer_id, customer_name FROM customers
     `;
     const ast = parseSQLPostgres(sql);
-    const schema = createSchema("postgres", [
+    const schema = createNamespace("postgres", [
       createTable("users", ["id", "name"]),
       createTable("customers", ["customer_id", "customer_name"]),
     ]);
@@ -1233,7 +1233,7 @@ describe("Set Operations (UNION, INTERSECT, EXCEPT)", () => {
       SELECT LOWER(name) AS name FROM customers
     `;
     const ast = parseSQLPostgres(sql);
-    const schema = createSchema("postgres", [
+    const schema = createNamespace("postgres", [
       createTable("users", ["id", "name"]),
       createTable("customers", ["id", "name"]),
     ]);
@@ -1263,7 +1263,7 @@ describe("Set Operations (UNION, INTERSECT, EXCEPT)", () => {
       SELECT SUM(amount) AS total FROM refunds
     `;
     const ast = parseSQLPostgres(sql);
-    const schema = createSchema("postgres", [
+    const schema = createNamespace("postgres", [
       createTable("sales", ["id", "amount"]),
       createTable("refunds", ["id", "amount"]),
     ]);
@@ -1292,7 +1292,7 @@ describe("Set Operations (UNION, INTERSECT, EXCEPT)", () => {
       SELECT id, company_name FROM customers
     `;
     const ast = parseSQLPostgres(sql);
-    const schema = createSchema("postgres", [
+    const schema = createNamespace("postgres", [
       createTable("users", ["id", "first_name", "last_name"]),
       createTable("customers", ["id", "company_name"]),
     ]);
@@ -1310,7 +1310,7 @@ describe("Set Operations (UNION, INTERSECT, EXCEPT)", () => {
       SELECT id FROM (SELECT id FROM customers WHERE verified = true) AS verified_customers
     `;
     const ast = parseSQLPostgres(sql);
-    const schema = createSchema("postgres", [
+    const schema = createNamespace("postgres", [
       createTable("users", ["id", "active"]),
       createTable("customers", ["id", "verified"]),
     ]);
@@ -1327,7 +1327,7 @@ describe("Set Operations (UNION, INTERSECT, EXCEPT)", () => {
       SELECT id FROM users
     `;
     const ast = parseSQLPostgres(sql);
-    const schema = createSchema("postgres", [createTable("users", ["id", "name"])]);
+    const schema = createNamespace("postgres", [createTable("users", ["id", "name"])]);
 
     const lineage = getLineage(ast as Select, schema);
 
@@ -1338,6 +1338,323 @@ describe("Set Operations (UNION, INTERSECT, EXCEPT)", () => {
       namespace: "postgres",
       field: "id",
       transformations: [DIRECT_IDENTITY],
+    });
+  });
+});
+
+describe("Multi-Schema Support", () => {
+  test("select from table with explicit schema", () => {
+    const sql = `SELECT id, name FROM myschema.users`;
+    const ast = parseSQL(sql);
+    const namespace = createNamespace("trino", [
+      createTable("myschema.users", ["id", "name", "email"]),
+      createTable("otherschema.users", ["id", "username"]),
+    ]);
+
+    const lineage = getLineage(ast as Select, namespace);
+
+    expect(lineage).toEqual({
+      id: {
+        inputFields: [
+          {
+            name: "myschema.users",
+            namespace: "trino",
+            field: "id",
+            transformations: [DIRECT_IDENTITY],
+          },
+        ],
+      },
+      name: {
+        inputFields: [
+          {
+            name: "myschema.users",
+            namespace: "trino",
+            field: "name",
+            transformations: [DIRECT_IDENTITY],
+          },
+        ],
+      },
+    });
+  });
+
+  test("select from table with default schema", () => {
+    const sql = `SELECT id, name FROM users`;
+    const ast = parseSQL(sql);
+    const namespace = createNamespace(
+      "trino",
+      [
+        createTable("myschema.users", ["id", "name", "email"]),
+        createTable("otherschema.users", ["id", "username"]),
+      ],
+      "myschema", // default schema
+    );
+
+    const lineage = getLineage(ast as Select, namespace);
+
+    expect(lineage).toEqual({
+      id: {
+        inputFields: [
+          {
+            name: "myschema.users",
+            namespace: "trino",
+            field: "id",
+            transformations: [DIRECT_IDENTITY],
+          },
+        ],
+      },
+      name: {
+        inputFields: [
+          {
+            name: "myschema.users",
+            namespace: "trino",
+            field: "name",
+            transformations: [DIRECT_IDENTITY],
+          },
+        ],
+      },
+    });
+  });
+
+  test("join across different schemas", () => {
+    const sql = `
+      SELECT 
+        u.id,
+        u.name,
+        o.total
+      FROM myschema.users u
+      JOIN orders_schema.orders o ON u.id = o.user_id
+    `;
+    const ast = parseSQL(sql);
+    const namespace = createNamespace("trino", [
+      createTable("myschema.users", ["id", "name"]),
+      createTable("orders_schema.orders", ["id", "user_id", "total"]),
+    ]);
+
+    const lineage = getLineage(ast as Select, namespace);
+
+    expect(lineage).toEqual({
+      id: {
+        inputFields: [
+          {
+            name: "myschema.users",
+            namespace: "trino",
+            field: "id",
+            transformations: [DIRECT_IDENTITY],
+          },
+        ],
+      },
+      name: {
+        inputFields: [
+          {
+            name: "myschema.users",
+            namespace: "trino",
+            field: "name",
+            transformations: [DIRECT_IDENTITY],
+          },
+        ],
+      },
+      total: {
+        inputFields: [
+          {
+            name: "orders_schema.orders",
+            namespace: "trino",
+            field: "total",
+            transformations: [DIRECT_IDENTITY],
+          },
+        ],
+      },
+    });
+  });
+
+  test("mix explicit and default schema tables", () => {
+    const sql = `
+      SELECT 
+        u.id,
+        u.name,
+        o.total
+      FROM users u
+      JOIN orders_schema.orders o ON u.id = o.user_id
+    `;
+    const ast = parseSQL(sql);
+    const namespace = createNamespace(
+      "trino",
+      [
+        createTable("myschema.users", ["id", "name"]),
+        createTable("orders_schema.orders", ["id", "user_id", "total"]),
+      ],
+      "myschema", // default schema
+    );
+
+    const lineage = getLineage(ast as Select, namespace);
+
+    expect(lineage).toEqual({
+      id: {
+        inputFields: [
+          {
+            name: "myschema.users",
+            namespace: "trino",
+            field: "id",
+            transformations: [DIRECT_IDENTITY],
+          },
+        ],
+      },
+      name: {
+        inputFields: [
+          {
+            name: "myschema.users",
+            namespace: "trino",
+            field: "name",
+            transformations: [DIRECT_IDENTITY],
+          },
+        ],
+      },
+      total: {
+        inputFields: [
+          {
+            name: "orders_schema.orders",
+            namespace: "trino",
+            field: "total",
+            transformations: [DIRECT_IDENTITY],
+          },
+        ],
+      },
+    });
+  });
+
+  test("same table name in different schemas", () => {
+    const sql = `
+      SELECT 
+        u1.id as user1_id,
+        u2.id as user2_id
+      FROM schema1.users u1
+      JOIN schema2.users u2 ON u1.id = u2.id
+    `;
+    const ast = parseSQL(sql);
+    const namespace = createNamespace("trino", [
+      createTable("schema1.users", ["id", "name"]),
+      createTable("schema2.users", ["id", "username"]),
+    ]);
+
+    const lineage = getLineage(ast as Select, namespace);
+
+    expect(lineage).toEqual({
+      user1_id: {
+        inputFields: [
+          {
+            name: "schema1.users",
+            namespace: "trino",
+            field: "id",
+            transformations: [DIRECT_IDENTITY],
+          },
+        ],
+      },
+      user2_id: {
+        inputFields: [
+          {
+            name: "schema2.users",
+            namespace: "trino",
+            field: "id",
+            transformations: [DIRECT_IDENTITY],
+          },
+        ],
+      },
+    });
+  });
+
+  test("CTE with schema-qualified tables", () => {
+    const sql = `
+      WITH active_users AS (
+        SELECT id, name FROM myschema.users WHERE status = 'active'
+      )
+      SELECT 
+        au.id,
+        au.name,
+        o.total
+      FROM active_users au
+      JOIN orders_schema.orders o ON au.id = o.user_id
+    `;
+    const ast = parseSQL(sql);
+    const namespace = createNamespace("trino", [
+      createTable("myschema.users", ["id", "name", "status"]),
+      createTable("orders_schema.orders", ["id", "user_id", "total"]),
+    ]);
+
+    const lineage = getLineage(ast as Select, namespace);
+
+    expect(lineage).toEqual({
+      id: {
+        inputFields: [
+          {
+            name: "myschema.users",
+            namespace: "trino",
+            field: "id",
+            transformations: [DIRECT_IDENTITY],
+          },
+        ],
+      },
+      name: {
+        inputFields: [
+          {
+            name: "myschema.users",
+            namespace: "trino",
+            field: "name",
+            transformations: [DIRECT_IDENTITY],
+          },
+        ],
+      },
+      total: {
+        inputFields: [
+          {
+            name: "orders_schema.orders",
+            namespace: "trino",
+            field: "total",
+            transformations: [DIRECT_IDENTITY],
+          },
+        ],
+      },
+    });
+  });
+
+  test("select * from schema-qualified table", () => {
+    const sql = `SELECT * FROM myschema.users`;
+    const ast = parseSQL(sql);
+    const namespace = createNamespace("trino", [
+      createTable("myschema.users", ["id", "name", "email"]),
+    ]);
+
+    const lineage = getLineage(ast as Select, namespace);
+
+    expect(lineage).toEqual({
+      id: {
+        inputFields: [
+          {
+            name: "myschema.users",
+            namespace: "trino",
+            field: "id",
+            transformations: [DIRECT_IDENTITY],
+          },
+        ],
+      },
+      name: {
+        inputFields: [
+          {
+            name: "myschema.users",
+            namespace: "trino",
+            field: "name",
+            transformations: [DIRECT_IDENTITY],
+          },
+        ],
+      },
+      email: {
+        inputFields: [
+          {
+            name: "myschema.users",
+            namespace: "trino",
+            field: "email",
+            transformations: [DIRECT_IDENTITY],
+          },
+        ],
+      },
     });
   });
 });

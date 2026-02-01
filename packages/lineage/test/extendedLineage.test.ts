@@ -3,7 +3,7 @@ import { Parser } from "node-sql-parser";
 import type { AST, Select } from "node-sql-parser";
 import {
   getExtendedLineage,
-  type Schema,
+  type Namespace,
   type Table,
   INDIRECT_JOIN,
   INDIRECT_FILTER,
@@ -17,9 +17,9 @@ import {
 
 const parser = new Parser();
 
-// Helper function to create schemas
-function createSchema(namespace: string, tables: Table[]): Schema {
-  return { namespace, tables };
+// Helper function to create namespaces
+function createNamespace(namespace: string, tables: Table[], defaultSchema?: string): Namespace {
+  return { namespace, tables, defaultSchema };
 }
 
 function createTable(name: string, columns: string[]): Table {
@@ -61,7 +61,7 @@ describe("getExtendedLineage - Simple SELECT (no indirect lineage)", () => {
     const sql = `SELECT id, name FROM users`;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [createTable("users", ["id", "name", "email"])]);
+    const schema = createNamespace("trino", [createTable("users", ["id", "name", "email"])]);
 
     const result = getExtendedLineage(ast as Select, schema);
 
@@ -89,7 +89,7 @@ describe("getExtendedLineage - Simple SELECT (no indirect lineage)", () => {
     const sql = `SELECT id as user_id, name as user_name FROM users`;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [createTable("users", ["id", "name"])]);
+    const schema = createNamespace("trino", [createTable("users", ["id", "name"])]);
 
     const result = getExtendedLineage(ast as Select, schema);
 
@@ -118,7 +118,7 @@ describe("getExtendedLineage - JOIN only", () => {
     `;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [
+    const schema = createNamespace("trino", [
       createTable("users", ["id", "name"]),
       createTable("orders", ["id", "user_id", "total"]),
     ]);
@@ -158,7 +158,7 @@ describe("getExtendedLineage - JOIN only", () => {
     `;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [
+    const schema = createNamespace("trino", [
       createTable("users", ["id", "name"]),
       createTable("orders", ["id", "user_id", "total"]),
     ]);
@@ -177,7 +177,7 @@ describe("getExtendedLineage - JOIN only", () => {
     `;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [
+    const schema = createNamespace("trino", [
       createTable("users", ["id", "name"]),
       createTable("orders", ["id", "user_id", "total"]),
     ]);
@@ -196,7 +196,7 @@ describe("getExtendedLineage - JOIN only", () => {
     `;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [
+    const schema = createNamespace("trino", [
       createTable("users", ["id", "name"]),
       createTable("orders", ["id", "user_id", "total"]),
     ]);
@@ -248,7 +248,7 @@ describe("getExtendedLineage - JOIN only", () => {
     `;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [
+    const schema = createNamespace("trino", [
       createTable("users", ["id", "name"]),
       createTable("orders", ["id", "user_id", "total"]),
     ]);
@@ -267,7 +267,7 @@ describe("getExtendedLineage - JOIN only", () => {
     `;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [
+    const schema = createNamespace("trino", [
       createTable("users", ["id", "name", "region"]),
       createTable("orders", ["id", "user_id", "region", "total"]),
     ]);
@@ -311,7 +311,7 @@ describe("getExtendedLineage - JOIN only", () => {
     `;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [
+    const schema = createNamespace("trino", [
       createTable("users", ["id", "name", "status"]),
       createTable("orders", ["id", "user_id", "status", "total"]),
     ]);
@@ -347,7 +347,7 @@ describe("getExtendedLineage - JOIN only", () => {
     `;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [
+    const schema = createNamespace("trino", [
       createTable("users", ["id", "name"]),
       createTable("products", ["id", "name"]),
     ]);
@@ -388,7 +388,7 @@ describe("getExtendedLineage - JOIN only", () => {
     `;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [
+    const schema = createNamespace("trino", [
       createTable("users", ["id", "name", "status"]),
       createTable("products", ["id", "name", "category"]),
     ]);
@@ -425,7 +425,7 @@ describe("getExtendedLineage - JOIN only", () => {
     `;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [
+    const schema = createNamespace("trino", [
       createTable("users", ["id", "name"]),
       createTable("orders", ["id", "user_id", "total"]),
       createTable("products", ["id", "name"]),
@@ -477,7 +477,7 @@ describe("getExtendedLineage - JOIN only", () => {
     `;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [
+    const schema = createNamespace("trino", [
       createTable("users", ["id", "name"]),
       createTable("products", ["id", "name"]),
     ]);
@@ -511,7 +511,7 @@ describe("getExtendedLineage - JOIN only", () => {
     `;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [
+    const schema = createNamespace("trino", [
       createTable("users", ["id", "name"]),
       createTable("orders", ["id", "user_id", "total"]),
     ]);
@@ -562,7 +562,7 @@ describe("getExtendedLineage - JOIN only", () => {
     `;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [
+    const schema = createNamespace("trino", [
       createTable("users", ["id", "name"]),
       createTable("orders", ["id", "user_id", "product_id", "total"]),
       createTable("products", ["id", "name"]),
@@ -582,7 +582,7 @@ describe("getExtendedLineage - JOIN only", () => {
     `;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [
+    const schema = createNamespace("trino", [
       createTable("users", ["id", "status"]),
       createTable("orders", ["id", "user_id", "status", "total"]),
     ]);
@@ -601,7 +601,7 @@ describe("getExtendedLineage - JOIN only", () => {
     `;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [createTable("employees", ["id", "name", "manager_id"])]);
+    const schema = createNamespace("trino", [createTable("employees", ["id", "name", "manager_id"])]);
 
     const result = getExtendedLineage(ast as Select, schema);
 
@@ -619,7 +619,7 @@ describe("getExtendedLineage - WHERE only (FILTER)", () => {
     `;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [createTable("users", ["id", "name", "status"])]);
+    const schema = createNamespace("trino", [createTable("users", ["id", "name", "status"])]);
 
     const result = getExtendedLineage(ast as Select, schema);
 
@@ -641,7 +641,7 @@ describe("getExtendedLineage - WHERE only (FILTER)", () => {
     `;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [createTable("users", ["id", "name", "status", "age"])]);
+    const schema = createNamespace("trino", [createTable("users", ["id", "name", "status", "age"])]);
 
     const result = getExtendedLineage(ast as Select, schema);
 
@@ -669,7 +669,7 @@ describe("getExtendedLineage - WHERE only (FILTER)", () => {
     `;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [createTable("users", ["id", "name", "status", "country"])]);
+    const schema = createNamespace("trino", [createTable("users", ["id", "name", "status", "country"])]);
 
     const result = getExtendedLineage(ast as Select, schema);
 
@@ -685,7 +685,7 @@ describe("getExtendedLineage - WHERE only (FILTER)", () => {
     `;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [
+    const schema = createNamespace("trino", [
       createTable("users", ["id", "name", "status", "age", "country", "verified"]),
     ]);
 
@@ -703,7 +703,7 @@ describe("getExtendedLineage - WHERE only (FILTER)", () => {
     `;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [createTable("users", ["id", "name", "country"])]);
+    const schema = createNamespace("trino", [createTable("users", ["id", "name", "country"])]);
 
     const result = getExtendedLineage(ast as Select, schema);
 
@@ -725,7 +725,7 @@ describe("getExtendedLineage - WHERE only (FILTER)", () => {
     `;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [createTable("users", ["id", "name", "age"])]);
+    const schema = createNamespace("trino", [createTable("users", ["id", "name", "age"])]);
 
     const result = getExtendedLineage(ast as Select, schema);
 
@@ -741,7 +741,7 @@ describe("getExtendedLineage - WHERE only (FILTER)", () => {
     `;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [createTable("users", ["id", "name"])]);
+    const schema = createNamespace("trino", [createTable("users", ["id", "name"])]);
 
     const result = getExtendedLineage(ast as Select, schema);
 
@@ -757,7 +757,7 @@ describe("getExtendedLineage - WHERE only (FILTER)", () => {
     `;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [createTable("users", ["id", "name", "email"])]);
+    const schema = createNamespace("trino", [createTable("users", ["id", "name", "email"])]);
 
     const result = getExtendedLineage(ast as Select, schema);
 
@@ -775,7 +775,7 @@ describe("getExtendedLineage - GROUP BY only", () => {
     `;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [createTable("users", ["id", "name", "country"])]);
+    const schema = createNamespace("trino", [createTable("users", ["id", "name", "country"])]);
 
     const result = getExtendedLineage(ast as Select, schema);
 
@@ -797,7 +797,7 @@ describe("getExtendedLineage - GROUP BY only", () => {
     `;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [createTable("users", ["id", "name", "country", "city"])]);
+    const schema = createNamespace("trino", [createTable("users", ["id", "name", "country", "city"])]);
 
     const result = getExtendedLineage(ast as Select, schema);
 
@@ -829,7 +829,7 @@ describe("getExtendedLineage - GROUP BY only", () => {
     `;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [
+    const schema = createNamespace("trino", [
       createTable("employees", ["id", "department", "salary", "age", "hire_date"]),
     ]);
 
@@ -864,7 +864,7 @@ describe("getExtendedLineage - ORDER BY only (SORT)", () => {
     `;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [createTable("users", ["id", "name", "created_at"])]);
+    const schema = createNamespace("trino", [createTable("users", ["id", "name", "created_at"])]);
 
     const result = getExtendedLineage(ast as Select, schema);
 
@@ -886,7 +886,7 @@ describe("getExtendedLineage - ORDER BY only (SORT)", () => {
     `;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [createTable("users", ["id", "name", "country"])]);
+    const schema = createNamespace("trino", [createTable("users", ["id", "name", "country"])]);
 
     const result = getExtendedLineage(ast as Select, schema);
 
@@ -914,7 +914,7 @@ describe("getExtendedLineage - ORDER BY only (SORT)", () => {
     `;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [createTable("users", ["id", "name", "email"])]);
+    const schema = createNamespace("trino", [createTable("users", ["id", "name", "email"])]);
 
     const result = getExtendedLineage(ast as Select, schema);
 
@@ -931,7 +931,7 @@ describe("getExtendedLineage - ORDER BY only (SORT)", () => {
     `;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [createTable("orders", ["id", "country", "revenue"])]);
+    const schema = createNamespace("trino", [createTable("orders", ["id", "country", "revenue"])]);
 
     const result = getExtendedLineage(ast as Select, schema);
 
@@ -954,7 +954,7 @@ describe("getExtendedLineage - ORDER BY only (SORT)", () => {
     `;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [createTable("order_items", ["id", "product_id", "quantity", "price"])]);
+    const schema = createNamespace("trino", [createTable("order_items", ["id", "product_id", "quantity", "price"])]);
 
     const result = getExtendedLineage(ast as Select, schema);
 
@@ -984,7 +984,7 @@ describe("getExtendedLineage - ORDER BY only (SORT)", () => {
     `;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [createTable("orders", ["id", "country", "revenue"])]);
+    const schema = createNamespace("trino", [createTable("orders", ["id", "country", "revenue"])]);
 
     const result = getExtendedLineage(ast as Select, schema);
 
@@ -1015,7 +1015,7 @@ describe("getExtendedLineage - HAVING only", () => {
     `;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [createTable("users", ["id", "name", "country"])]);
+    const schema = createNamespace("trino", [createTable("users", ["id", "name", "country"])]);
 
     const result = getExtendedLineage(ast as Select, schema);
 
@@ -1035,7 +1035,7 @@ describe("getExtendedLineage - HAVING only", () => {
     `;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [createTable("employees", ["id", "department", "salary"])]);
+    const schema = createNamespace("trino", [createTable("employees", ["id", "department", "salary"])]);
 
     const result = getExtendedLineage(ast as Select, schema);
 
@@ -1062,7 +1062,7 @@ describe("getExtendedLineage - HAVING only", () => {
     `;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [createTable("employees", ["id", "department", "age"])]);
+    const schema = createNamespace("trino", [createTable("employees", ["id", "department", "age"])]);
 
     const result = getExtendedLineage(ast as Select, schema);
 
@@ -1082,7 +1082,7 @@ describe("getExtendedLineage - WINDOW functions", () => {
     `;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [createTable("employees", ["id", "department", "salary"])]);
+    const schema = createNamespace("trino", [createTable("employees", ["id", "department", "salary"])]);
 
     const result = getExtendedLineage(ast as Select, schema);
 
@@ -1134,7 +1134,7 @@ describe("getExtendedLineage - WINDOW functions", () => {
     `;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [createTable("transactions", ["id", "amount", "date", "status"])]);
+    const schema = createNamespace("trino", [createTable("transactions", ["id", "amount", "date", "status"])]);
 
     const result = getExtendedLineage(ast as Select, schema);
 
@@ -1168,7 +1168,7 @@ describe("getExtendedLineage - WINDOW functions", () => {
     `;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [createTable("orders", ["id", "category", "created_at", "amount", "user_id"])]);
+    const schema = createNamespace("trino", [createTable("orders", ["id", "category", "created_at", "amount", "user_id"])]);
 
     const result = getExtendedLineage(ast as Select, schema);
 
@@ -1210,7 +1210,7 @@ describe("getExtendedLineage - CASE expressions (CONDITION)", () => {
     `;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [createTable("users", ["id", "status"])]);
+    const schema = createNamespace("trino", [createTable("users", ["id", "status"])]);
 
     const result = getExtendedLineage(ast as Select, schema);
 
@@ -1237,7 +1237,7 @@ describe("getExtendedLineage - CASE expressions (CONDITION)", () => {
     `;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [createTable("users", ["id", "age"])]);
+    const schema = createNamespace("trino", [createTable("users", ["id", "age"])]);
 
     const result = getExtendedLineage(ast as Select, schema);
 
@@ -1257,7 +1257,7 @@ describe("getExtendedLineage - CASE expressions (CONDITION)", () => {
     `;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [createTable("products", ["id", "price", "discount_type", "discount_value"])]);
+    const schema = createNamespace("trino", [createTable("products", ["id", "price", "discount_type", "discount_value"])]);
 
     const result = getExtendedLineage(ast as Select, schema);
 
@@ -1282,7 +1282,7 @@ describe("getExtendedLineage - JOIN + WHERE", () => {
     `;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [
+    const schema = createNamespace("trino", [
       createTable("users", ["id", "name", "status"]),
       createTable("orders", ["id", "user_id", "total"]),
     ]);
@@ -1324,7 +1324,7 @@ describe("getExtendedLineage - JOIN + GROUP BY", () => {
     `;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [
+    const schema = createNamespace("trino", [
       createTable("users", ["id", "country"]),
       createTable("orders", ["id", "user_id", "total"]),
     ]);
@@ -1366,7 +1366,7 @@ describe("getExtendedLineage - WHERE + GROUP BY + HAVING", () => {
     `;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [createTable("employees", ["id", "department", "salary", "status"])]);
+    const schema = createNamespace("trino", [createTable("employees", ["id", "department", "salary", "status"])]);
 
     const result = getExtendedLineage(ast as Select, schema);
 
@@ -1407,7 +1407,7 @@ describe("getExtendedLineage - Full query with all clauses", () => {
     `;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [
+    const schema = createNamespace("trino", [
       createTable("users", ["id", "country", "status"]),
       createTable("orders", ["id", "user_id", "total", "order_date"]),
     ]);
@@ -1453,7 +1453,7 @@ describe("getExtendedLineage - Full query with all clauses", () => {
     `;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [
+    const schema = createNamespace("trino", [
       createTable("employees", ["id", "name", "department_id", "salary", "status"]),
       createTable("departments", ["id", "name"]),
     ]);
@@ -1532,7 +1532,7 @@ describe("getExtendedLineage - WITH clause (CTEs)", () => {
     `;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [createTable("users", ["id", "name", "country", "status"])]);
+    const schema = createNamespace("trino", [createTable("users", ["id", "name", "country", "status"])]);
 
     const result = getExtendedLineage(ast as Select, schema);
 
@@ -1578,7 +1578,7 @@ describe("getExtendedLineage - WITH clause (CTEs)", () => {
     `;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [
+    const schema = createNamespace("trino", [
       createTable("users", ["id", "name", "country", "status"]),
       createTable("orders", ["id", "user_id", "total"]),
     ]);
@@ -1671,7 +1671,7 @@ describe("getExtendedLineage - WITH clause (CTEs)", () => {
     `;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [
+    const schema = createNamespace("trino", [
       createTable("sales", ["id", "product_id", "store_id", "quantity", "price", "sale_date"]),
       createTable("stores", ["id", "name"]),
     ]);
@@ -1756,7 +1756,7 @@ describe("getExtendedLineage - Subqueries", () => {
     `;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [createTable("users", ["id", "country", "status"])]);
+    const schema = createNamespace("trino", [createTable("users", ["id", "country", "status"])]);
 
     const result = getExtendedLineage(ast as Select, schema);
 
@@ -1786,7 +1786,7 @@ describe("getExtendedLineage - Edge cases", () => {
     `;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [createTable("users", ["id", "status"])]);
+    const schema = createNamespace("trino", [createTable("users", ["id", "status"])]);
 
     const result = getExtendedLineage(ast as Select, schema);
 
@@ -1822,7 +1822,7 @@ describe("getExtendedLineage - Edge cases", () => {
     `;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [
+    const schema = createNamespace("trino", [
       createTable("users", ["id", "name", "favorite_product_id"]),
       createTable("products", ["id", "name"]),
     ]);
@@ -1867,7 +1867,7 @@ describe("getExtendedLineage - Edge cases", () => {
     `;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [createTable("users", ["id", "name", "status"])]);
+    const schema = createNamespace("trino", [createTable("users", ["id", "name", "status"])]);
 
     const result = getExtendedLineage(ast as Select, schema);
 
@@ -1881,7 +1881,7 @@ describe("getExtendedLineage - Edge cases", () => {
     const sql = `SELECT id, UPPER(name) as upper_name FROM users`;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [createTable("users", ["id", "name"])]);
+    const schema = createNamespace("trino", [createTable("users", ["id", "name"])]);
 
     const result = getExtendedLineage(ast as Select, schema);
 
@@ -1900,7 +1900,7 @@ describe("getExtendedLineage - Edge cases", () => {
     `;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [createTable("users", ["id", "email", "ssn", "phone"])]);
+    const schema = createNamespace("trino", [createTable("users", ["id", "email", "ssn", "phone"])]);
 
     const result = getExtendedLineage(ast as Select, schema);
 
@@ -1918,7 +1918,7 @@ describe("getExtendedLineage - Edge cases", () => {
     `;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [createTable("users", ["id", "country"])]);
+    const schema = createNamespace("trino", [createTable("users", ["id", "country"])]);
 
     const result = getExtendedLineage(ast as Select, schema);
 
@@ -1955,7 +1955,7 @@ describe("getExtendedLineage - Real-world complex queries", () => {
     `;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [
+    const schema = createNamespace("trino", [
       createTable("categories", ["id", "name"]),
       createTable("products", ["id", "name", "category_id"]),
       createTable("order_items", ["id", "order_id", "product_id", "quantity", "unit_price"]),
@@ -2154,7 +2154,7 @@ describe("getExtendedLineage - Real-world complex queries", () => {
     `;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [
+    const schema = createNamespace("trino", [
       createTable("employees", ["id", "department_id", "salary", "status"]),
       createTable("departments", ["id", "name"]),
     ]);
@@ -2245,7 +2245,7 @@ describe("getExtendedLineage - Real-world complex queries", () => {
     `;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [createTable("events", ["id", "event_date", "event_type", "user_id"])]);
+    const schema = createNamespace("trino", [createTable("events", ["id", "event_date", "event_type", "user_id"])]);
 
     const result = getExtendedLineage(ast as Select, schema);
 
@@ -2356,7 +2356,7 @@ describe("getExtendedLineage - Real-world complex queries", () => {
     `;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [
+    const schema = createNamespace("trino", [
       createTable("sales", ["id", "store_id", "sale_timestamp", "amount"]),
       createTable("stores", ["id", "name", "region"]),
     ]);
@@ -2459,7 +2459,7 @@ describe("getExtendedLineage - Transformation type verification", () => {
     `;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [
+    const schema = createNamespace("trino", [
       createTable("users", ["id", "country", "status"]),
       createTable("orders", ["id", "user_id"]),
     ]);
@@ -2505,7 +2505,7 @@ describe("getExtendedLineage - Transformation type verification", () => {
     `;
 
     const ast = parseSQL(sql);
-    const schema = createSchema("trino", [
+    const schema = createNamespace("trino", [
       createTable("employees", ["id", "name", "email", "age", "status", "salary"]),
     ]);
 
@@ -2552,7 +2552,7 @@ describe("getExtendedLineage - Set Operations (UNION, INTERSECT, EXCEPT)", () =>
       SELECT id, name FROM customers WHERE verified = true
     `;
     const ast = parseSQLPostgres(sql);
-    const schema = createSchema("postgres", [
+    const schema = createNamespace("postgres", [
       createTable("users", ["id", "name", "status"]),
       createTable("customers", ["id", "name", "verified"]),
     ]);
@@ -2587,7 +2587,7 @@ describe("getExtendedLineage - Set Operations (UNION, INTERSECT, EXCEPT)", () =>
       SELECT department_id FROM managers GROUP BY department_id
     `;
     const ast = parseSQLPostgres(sql);
-    const schema = createSchema("postgres", [
+    const schema = createNamespace("postgres", [
       createTable("employees", ["id", "department_id"]),
       createTable("managers", ["id", "department_id"]),
     ]);
@@ -2621,7 +2621,7 @@ describe("getExtendedLineage - Set Operations (UNION, INTERSECT, EXCEPT)", () =>
       SELECT id FROM banned_users ORDER BY banned_at
     `;
     const ast = parseSQLPostgres(sql);
-    const schema = createSchema("postgres", [
+    const schema = createNamespace("postgres", [
       createTable("users", ["id", "created_at"]),
       createTable("banned_users", ["id", "banned_at"]),
     ]);
@@ -2654,7 +2654,7 @@ describe("getExtendedLineage - Set Operations (UNION, INTERSECT, EXCEPT)", () =>
       SELECT id FROM vendors WHERE region = 'APAC'
     `;
     const ast = parseSQLPostgres(sql);
-    const schema = createSchema("postgres", [
+    const schema = createNamespace("postgres", [
       createTable("users", ["id", "region"]),
       createTable("customers", ["id", "region"]),
       createTable("vendors", ["id", "region"]),
@@ -2696,7 +2696,7 @@ describe("getExtendedLineage - Set Operations (UNION, INTERSECT, EXCEPT)", () =>
       JOIN purchases p ON c.id = p.customer_id
     `;
     const ast = parseSQLPostgres(sql);
-    const schema = createSchema("postgres", [
+    const schema = createNamespace("postgres", [
       createTable("users", ["id", "name"]),
       createTable("orders", ["id", "user_id"]),
       createTable("customers", ["id", "name"]),

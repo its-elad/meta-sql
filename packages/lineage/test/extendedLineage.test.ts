@@ -188,6 +188,371 @@ describe("getExtendedLineage - JOIN only", () => {
     expect(joinLineage.length).toBe(2);
   });
 
+  test("FULL OUTER JOIN", () => {
+    const sql = `
+      SELECT u.id, u.name, o.total
+      FROM users u
+      FULL OUTER JOIN orders o ON u.id = o.user_id
+    `;
+
+    const ast = parseSQL(sql);
+    const schema = createSchema("trino", [
+      createTable("users", ["id", "name"]),
+      createTable("orders", ["id", "user_id", "total"]),
+    ]);
+
+    const result = getExtendedLineage(ast as Select, schema);
+
+    // Field-level lineage
+    expect(result.fields.id?.inputFields).toContainEqual({
+      namespace: "trino",
+      name: "users",
+      field: "id",
+      transformations: [DIRECT_IDENTITY],
+    });
+    expect(result.fields.name?.inputFields).toContainEqual({
+      namespace: "trino",
+      name: "users",
+      field: "name",
+      transformations: [DIRECT_IDENTITY],
+    });
+    expect(result.fields.total?.inputFields).toContainEqual({
+      namespace: "trino",
+      name: "orders",
+      field: "total",
+      transformations: [DIRECT_IDENTITY],
+    });
+
+    // Dataset-level lineage - JOIN columns from both tables
+    const joinLineage = findBySubtype(result.dataset, "JOIN");
+    expect(joinLineage.length).toBe(2);
+    expect(joinLineage).toContainEqual({
+      namespace: "trino",
+      name: "users",
+      field: "id",
+      transformations: [INDIRECT_JOIN],
+    });
+    expect(joinLineage).toContainEqual({
+      namespace: "trino",
+      name: "orders",
+      field: "user_id",
+      transformations: [INDIRECT_JOIN],
+    });
+  });
+
+  test("FULL JOIN (shorthand)", () => {
+    const sql = `
+      SELECT u.id, o.total
+      FROM users u
+      FULL JOIN orders o ON u.id = o.user_id
+    `;
+
+    const ast = parseSQL(sql);
+    const schema = createSchema("trino", [
+      createTable("users", ["id", "name"]),
+      createTable("orders", ["id", "user_id", "total"]),
+    ]);
+
+    const result = getExtendedLineage(ast as Select, schema);
+
+    const joinLineage = findBySubtype(result.dataset, "JOIN");
+    expect(joinLineage.length).toBe(2);
+  });
+
+  test("FULL OUTER JOIN with complex ON condition", () => {
+    const sql = `
+      SELECT u.id, u.name, o.total
+      FROM users u
+      FULL OUTER JOIN orders o ON u.id = o.user_id AND u.region = o.region
+    `;
+
+    const ast = parseSQL(sql);
+    const schema = createSchema("trino", [
+      createTable("users", ["id", "name", "region"]),
+      createTable("orders", ["id", "user_id", "region", "total"]),
+    ]);
+
+    const result = getExtendedLineage(ast as Select, schema);
+
+    const joinLineage = findBySubtype(result.dataset, "JOIN");
+    expect(joinLineage.length).toBe(4); // u.id, o.user_id, u.region, o.region
+    expect(joinLineage).toContainEqual({
+      namespace: "trino",
+      name: "users",
+      field: "id",
+      transformations: [INDIRECT_JOIN],
+    });
+    expect(joinLineage).toContainEqual({
+      namespace: "trino",
+      name: "orders",
+      field: "user_id",
+      transformations: [INDIRECT_JOIN],
+    });
+    expect(joinLineage).toContainEqual({
+      namespace: "trino",
+      name: "users",
+      field: "region",
+      transformations: [INDIRECT_JOIN],
+    });
+    expect(joinLineage).toContainEqual({
+      namespace: "trino",
+      name: "orders",
+      field: "region",
+      transformations: [INDIRECT_JOIN],
+    });
+  });
+
+  test("FULL OUTER JOIN with WHERE clause", () => {
+    const sql = `
+      SELECT u.id, u.name, o.total
+      FROM users u
+      FULL OUTER JOIN orders o ON u.id = o.user_id
+      WHERE u.status = 'active' OR o.status = 'completed'
+    `;
+
+    const ast = parseSQL(sql);
+    const schema = createSchema("trino", [
+      createTable("users", ["id", "name", "status"]),
+      createTable("orders", ["id", "user_id", "status", "total"]),
+    ]);
+
+    const result = getExtendedLineage(ast as Select, schema);
+
+    // JOIN lineage
+    const joinLineage = findBySubtype(result.dataset, "JOIN");
+    expect(joinLineage.length).toBe(2);
+
+    // FILTER lineage from WHERE clause
+    const filterLineage = findBySubtype(result.dataset, "FILTER");
+    expect(filterLineage.length).toBe(2);
+    expect(filterLineage).toContainEqual({
+      namespace: "trino",
+      name: "users",
+      field: "status",
+      transformations: [INDIRECT_FILTER],
+    });
+    expect(filterLineage).toContainEqual({
+      namespace: "trino",
+      name: "orders",
+      field: "status",
+      transformations: [INDIRECT_FILTER],
+    });
+  });
+
+  test("CROSS JOIN", () => {
+    const sql = `
+      SELECT u.id, u.name, p.name as product_name
+      FROM users u
+      CROSS JOIN products p
+    `;
+
+    const ast = parseSQL(sql);
+    const schema = createSchema("trino", [
+      createTable("users", ["id", "name"]),
+      createTable("products", ["id", "name"]),
+    ]);
+
+    const result = getExtendedLineage(ast as Select, schema);
+
+    // Field-level lineage should work correctly
+    expect(result.fields.id?.inputFields).toContainEqual({
+      namespace: "trino",
+      name: "users",
+      field: "id",
+      transformations: [DIRECT_IDENTITY],
+    });
+    expect(result.fields.name?.inputFields).toContainEqual({
+      namespace: "trino",
+      name: "users",
+      field: "name",
+      transformations: [DIRECT_IDENTITY],
+    });
+    expect(result.fields.product_name?.inputFields).toContainEqual({
+      namespace: "trino",
+      name: "products",
+      field: "name",
+      transformations: [DIRECT_IDENTITY],
+    });
+
+    // CROSS JOIN has no ON clause, so no JOIN lineage in dataset
+    const joinLineage = findBySubtype(result.dataset, "JOIN");
+    expect(joinLineage.length).toBe(0);
+  });
+
+  test("CROSS JOIN with WHERE clause", () => {
+    const sql = `
+      SELECT u.id, u.name, p.name as product_name
+      FROM users u
+      CROSS JOIN products p
+      WHERE u.status = 'active' AND p.category = 'electronics'
+    `;
+
+    const ast = parseSQL(sql);
+    const schema = createSchema("trino", [
+      createTable("users", ["id", "name", "status"]),
+      createTable("products", ["id", "name", "category"]),
+    ]);
+
+    const result = getExtendedLineage(ast as Select, schema);
+
+    // CROSS JOIN has no ON clause, so no JOIN lineage
+    const joinLineage = findBySubtype(result.dataset, "JOIN");
+    expect(joinLineage.length).toBe(0);
+
+    // FILTER lineage from WHERE clause should be captured
+    const filterLineage = findBySubtype(result.dataset, "FILTER");
+    expect(filterLineage.length).toBe(2);
+    expect(filterLineage).toContainEqual({
+      namespace: "trino",
+      name: "users",
+      field: "status",
+      transformations: [INDIRECT_FILTER],
+    });
+    expect(filterLineage).toContainEqual({
+      namespace: "trino",
+      name: "products",
+      field: "category",
+      transformations: [INDIRECT_FILTER],
+    });
+  });
+
+  test("CROSS JOIN combined with regular JOIN", () => {
+    const sql = `
+      SELECT u.id, o.total, p.name as product_name
+      FROM users u
+      JOIN orders o ON u.id = o.user_id
+      CROSS JOIN products p
+    `;
+
+    const ast = parseSQL(sql);
+    const schema = createSchema("trino", [
+      createTable("users", ["id", "name"]),
+      createTable("orders", ["id", "user_id", "total"]),
+      createTable("products", ["id", "name"]),
+    ]);
+
+    const result = getExtendedLineage(ast as Select, schema);
+
+    // Field-level lineage
+    expect(result.fields.id?.inputFields).toContainEqual({
+      namespace: "trino",
+      name: "users",
+      field: "id",
+      transformations: [DIRECT_IDENTITY],
+    });
+    expect(result.fields.total?.inputFields).toContainEqual({
+      namespace: "trino",
+      name: "orders",
+      field: "total",
+      transformations: [DIRECT_IDENTITY],
+    });
+    expect(result.fields.product_name?.inputFields).toContainEqual({
+      namespace: "trino",
+      name: "products",
+      field: "name",
+      transformations: [DIRECT_IDENTITY],
+    });
+
+    // JOIN lineage only from the regular JOIN (not CROSS JOIN)
+    const joinLineage = findBySubtype(result.dataset, "JOIN");
+    expect(joinLineage.length).toBe(2);
+    expect(joinLineage).toContainEqual({
+      namespace: "trino",
+      name: "users",
+      field: "id",
+      transformations: [INDIRECT_JOIN],
+    });
+    expect(joinLineage).toContainEqual({
+      namespace: "trino",
+      name: "orders",
+      field: "user_id",
+      transformations: [INDIRECT_JOIN],
+    });
+  });
+
+  test("implicit CROSS JOIN (comma syntax)", () => {
+    const sql = `
+      SELECT u.id, u.name, p.name as product_name
+      FROM users u, products p
+    `;
+
+    const ast = parseSQL(sql);
+    const schema = createSchema("trino", [
+      createTable("users", ["id", "name"]),
+      createTable("products", ["id", "name"]),
+    ]);
+
+    const result = getExtendedLineage(ast as Select, schema);
+
+    // Field-level lineage should work correctly
+    expect(result.fields.id?.inputFields).toContainEqual({
+      namespace: "trino",
+      name: "users",
+      field: "id",
+      transformations: [DIRECT_IDENTITY],
+    });
+    expect(result.fields.product_name?.inputFields).toContainEqual({
+      namespace: "trino",
+      name: "products",
+      field: "name",
+      transformations: [DIRECT_IDENTITY],
+    });
+
+    // No JOIN lineage since implicit cross join has no ON clause
+    const joinLineage = findBySubtype(result.dataset, "JOIN");
+    expect(joinLineage.length).toBe(0);
+  });
+
+  test("implicit CROSS JOIN with WHERE acting as JOIN condition", () => {
+    const sql = `
+      SELECT u.id, o.total
+      FROM users u, orders o
+      WHERE u.id = o.user_id
+    `;
+
+    const ast = parseSQL(sql);
+    const schema = createSchema("trino", [
+      createTable("users", ["id", "name"]),
+      createTable("orders", ["id", "user_id", "total"]),
+    ]);
+
+    const result = getExtendedLineage(ast as Select, schema);
+
+    // Field-level lineage
+    expect(result.fields.id?.inputFields).toContainEqual({
+      namespace: "trino",
+      name: "users",
+      field: "id",
+      transformations: [DIRECT_IDENTITY],
+    });
+    expect(result.fields.total?.inputFields).toContainEqual({
+      namespace: "trino",
+      name: "orders",
+      field: "total",
+      transformations: [DIRECT_IDENTITY],
+    });
+
+    // No JOIN lineage (CROSS JOIN has no ON clause)
+    const joinLineage = findBySubtype(result.dataset, "JOIN");
+    expect(joinLineage.length).toBe(0);
+
+    // The WHERE condition is captured as FILTER lineage
+    const filterLineage = findBySubtype(result.dataset, "FILTER");
+    expect(filterLineage.length).toBe(2);
+    expect(filterLineage).toContainEqual({
+      namespace: "trino",
+      name: "users",
+      field: "id",
+      transformations: [INDIRECT_FILTER],
+    });
+    expect(filterLineage).toContainEqual({
+      namespace: "trino",
+      name: "orders",
+      field: "user_id",
+      transformations: [INDIRECT_FILTER],
+    });
+  });
+
   test("multiple JOINs", () => {
     const sql = `
       SELECT u.name, o.total, p.name as product_name
@@ -555,6 +920,88 @@ describe("getExtendedLineage - ORDER BY only (SORT)", () => {
 
     const sortLineage = findBySubtype(result.dataset, "SORT");
     expect(sortLineage.length).toBe(1);
+  });
+
+  test("ORDER BY alias resolves to base column", () => {
+    const sql = `
+      SELECT country, SUM(revenue) as total_revenue
+      FROM orders
+      GROUP BY country
+      ORDER BY total_revenue DESC
+    `;
+
+    const ast = parseSQL(sql);
+    const schema = createSchema("trino", [createTable("orders", ["id", "country", "revenue"])]);
+
+    const result = getExtendedLineage(ast as Select, schema);
+
+    // ORDER BY total_revenue should resolve to the base column 'revenue' used in SUM(revenue)
+    const sortLineage = findBySubtype(result.dataset, "SORT");
+    expect(sortLineage.length).toBe(1);
+    expect(sortLineage).toContainEqual({
+      namespace: "trino",
+      name: "orders",
+      field: "revenue",
+      transformations: [INDIRECT_SORT],
+    });
+  });
+
+  test("ORDER BY alias with multiple columns in expression", () => {
+    const sql = `
+      SELECT product_id, (quantity * price) as total_value
+      FROM order_items
+      ORDER BY total_value DESC
+    `;
+
+    const ast = parseSQL(sql);
+    const schema = createSchema("trino", [createTable("order_items", ["id", "product_id", "quantity", "price"])]);
+
+    const result = getExtendedLineage(ast as Select, schema);
+
+    // ORDER BY total_value should resolve to both 'quantity' and 'price' columns
+    const sortLineage = findBySubtype(result.dataset, "SORT");
+    expect(sortLineage.length).toBe(2);
+    expect(sortLineage).toContainEqual({
+      namespace: "trino",
+      name: "order_items",
+      field: "quantity",
+      transformations: [INDIRECT_SORT],
+    });
+    expect(sortLineage).toContainEqual({
+      namespace: "trino",
+      name: "order_items",
+      field: "price",
+      transformations: [INDIRECT_SORT],
+    });
+  });
+
+  test("ORDER BY with mix of alias and direct column references", () => {
+    const sql = `
+      SELECT country, SUM(revenue) as total_revenue
+      FROM orders
+      GROUP BY country
+      ORDER BY country ASC, total_revenue DESC
+    `;
+
+    const ast = parseSQL(sql);
+    const schema = createSchema("trino", [createTable("orders", ["id", "country", "revenue"])]);
+
+    const result = getExtendedLineage(ast as Select, schema);
+
+    const sortLineage = findBySubtype(result.dataset, "SORT");
+    expect(sortLineage.length).toBe(2);
+    expect(sortLineage).toContainEqual({
+      namespace: "trino",
+      name: "orders",
+      field: "country",
+      transformations: [INDIRECT_SORT],
+    });
+    expect(sortLineage).toContainEqual({
+      namespace: "trino",
+      name: "orders",
+      field: "revenue",
+      transformations: [INDIRECT_SORT],
+    });
   });
 });
 
@@ -2082,5 +2529,185 @@ describe("getExtendedLineage - Transformation type verification", () => {
 
     // AGGREGATION (without masking for SUM)
     expect(result.fields.total_salary?.inputFields[0]?.transformations).toContainEqual(DIRECT_AGGREGATION);
+  });
+});
+
+// Helper to parse SQL for PostgreSQL (which supports INTERSECT and EXCEPT)
+function parseSQLPostgres(sql: string): AST {
+  const result = parser.astify(sql, { database: "postgresql" });
+  const ast = Array.isArray(result) ? result[0] : result;
+
+  if (!ast) {
+    throw new Error("Failed to parse SQL");
+  }
+
+  return ast;
+}
+
+describe("getExtendedLineage - Set Operations (UNION, INTERSECT, EXCEPT)", () => {
+  test("UNION with WHERE clauses captures all dataset lineage", () => {
+    const sql = `
+      SELECT id, name FROM users WHERE status = 'active'
+      UNION
+      SELECT id, name FROM customers WHERE verified = true
+    `;
+    const ast = parseSQLPostgres(sql);
+    const schema = createSchema("postgres", [
+      createTable("users", ["id", "name", "status"]),
+      createTable("customers", ["id", "name", "verified"]),
+    ]);
+
+    const result = getExtendedLineage(ast as Select, schema);
+
+    // Field lineage should combine both sources
+    expect(result.fields.id?.inputFields).toHaveLength(2);
+    expect(result.fields.name?.inputFields).toHaveLength(2);
+
+    // Dataset lineage should include filters from both queries
+    const filterLineage = findBySubtype(result.dataset, "FILTER");
+    expect(filterLineage).toHaveLength(2);
+    expect(filterLineage).toContainEqual({
+      namespace: "postgres",
+      name: "users",
+      field: "status",
+      transformations: [INDIRECT_FILTER],
+    });
+    expect(filterLineage).toContainEqual({
+      namespace: "postgres",
+      name: "customers",
+      field: "verified",
+      transformations: [INDIRECT_FILTER],
+    });
+  });
+
+  test("INTERSECT with GROUP BY captures all dataset lineage", () => {
+    const sql = `
+      SELECT department_id FROM employees GROUP BY department_id
+      INTERSECT
+      SELECT department_id FROM managers GROUP BY department_id
+    `;
+    const ast = parseSQLPostgres(sql);
+    const schema = createSchema("postgres", [
+      createTable("employees", ["id", "department_id"]),
+      createTable("managers", ["id", "department_id"]),
+    ]);
+
+    const result = getExtendedLineage(ast as Select, schema);
+
+    // Field lineage combines both sources
+    expect(result.fields.department_id?.inputFields).toHaveLength(2);
+
+    // Dataset lineage should include GROUP BY from both queries
+    const groupByLineage = findBySubtype(result.dataset, "GROUP_BY");
+    expect(groupByLineage).toHaveLength(2);
+    expect(groupByLineage).toContainEqual({
+      namespace: "postgres",
+      name: "employees",
+      field: "department_id",
+      transformations: [INDIRECT_GROUP_BY],
+    });
+    expect(groupByLineage).toContainEqual({
+      namespace: "postgres",
+      name: "managers",
+      field: "department_id",
+      transformations: [INDIRECT_GROUP_BY],
+    });
+  });
+
+  test("EXCEPT with ORDER BY captures all dataset lineage", () => {
+    const sql = `
+      SELECT id FROM users ORDER BY created_at
+      EXCEPT
+      SELECT id FROM banned_users ORDER BY banned_at
+    `;
+    const ast = parseSQLPostgres(sql);
+    const schema = createSchema("postgres", [
+      createTable("users", ["id", "created_at"]),
+      createTable("banned_users", ["id", "banned_at"]),
+    ]);
+
+    const result = getExtendedLineage(ast as Select, schema);
+
+    // Dataset lineage should include ORDER BY from both queries
+    const sortLineage = findBySubtype(result.dataset, "SORT");
+    expect(sortLineage).toHaveLength(2);
+    expect(sortLineage).toContainEqual({
+      namespace: "postgres",
+      name: "users",
+      field: "created_at",
+      transformations: [INDIRECT_SORT],
+    });
+    expect(sortLineage).toContainEqual({
+      namespace: "postgres",
+      name: "banned_users",
+      field: "banned_at",
+      transformations: [INDIRECT_SORT],
+    });
+  });
+
+  test("chained UNION captures dataset lineage from all parts", () => {
+    const sql = `
+      SELECT id FROM users WHERE region = 'US'
+      UNION
+      SELECT id FROM customers WHERE region = 'EU'
+      UNION
+      SELECT id FROM vendors WHERE region = 'APAC'
+    `;
+    const ast = parseSQLPostgres(sql);
+    const schema = createSchema("postgres", [
+      createTable("users", ["id", "region"]),
+      createTable("customers", ["id", "region"]),
+      createTable("vendors", ["id", "region"]),
+    ]);
+
+    const result = getExtendedLineage(ast as Select, schema);
+
+    // Dataset lineage should include filters from all three queries
+    const filterLineage = findBySubtype(result.dataset, "FILTER");
+    expect(filterLineage).toHaveLength(3);
+    expect(filterLineage).toContainEqual({
+      namespace: "postgres",
+      name: "users",
+      field: "region",
+      transformations: [INDIRECT_FILTER],
+    });
+    expect(filterLineage).toContainEqual({
+      namespace: "postgres",
+      name: "customers",
+      field: "region",
+      transformations: [INDIRECT_FILTER],
+    });
+    expect(filterLineage).toContainEqual({
+      namespace: "postgres",
+      name: "vendors",
+      field: "region",
+      transformations: [INDIRECT_FILTER],
+    });
+  });
+
+  test("UNION with JOINs captures dataset lineage from both parts", () => {
+    const sql = `
+      SELECT u.id, u.name 
+      FROM users u 
+      JOIN orders o ON u.id = o.user_id
+      UNION
+      SELECT c.id, c.name 
+      FROM customers c 
+      JOIN purchases p ON c.id = p.customer_id
+    `;
+    const ast = parseSQLPostgres(sql);
+    const schema = createSchema("postgres", [
+      createTable("users", ["id", "name"]),
+      createTable("orders", ["id", "user_id"]),
+      createTable("customers", ["id", "name"]),
+      createTable("purchases", ["id", "customer_id"]),
+    ]);
+
+    const result = getExtendedLineage(ast as Select, schema);
+
+    // Dataset lineage should include JOIN conditions from both queries
+    const joinLineage = findBySubtype(result.dataset, "JOIN");
+    // Each JOIN contributes 2 fields (from ON condition)
+    expect(joinLineage.length).toBeGreaterThanOrEqual(4);
   });
 });

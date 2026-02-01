@@ -6,8 +6,6 @@ import {
   type ColumnLineageDatasetFacet,
   type InputField,
   type Transformation as _Transformation,
-  type TransformationType,
-  type TransformationSubtype,
 } from "@meta-sql/open-lineage";
 import {
   Select,
@@ -143,9 +141,11 @@ function mergeTransformations(parent: Transformation | undefined, child: Transfo
   return { ...child, masking: parent.masking || child.masking };
 }
 
+const transformationHasher = (value: Transformation): string =>
+  `${value.type}-${value.subtype}-${value.masking ? "MASKED" : "UNMASKED"}`;
 class TransformationSet extends HashSet<Transformation> {
   constructor(values?: readonly Transformation[]) {
-    super((value: Transformation) => `${value.type}-${value.subtype}-${value.masking ? "MASKED" : "UNMASKED"}`);
+    super((value: Transformation) => transformationHasher(value));
 
     if (values) {
       values.forEach((value) => this.add(value));
@@ -181,6 +181,19 @@ export type SelectWithAlias = Select & {
 };
 
 /**
+ * Set operation type for UNION, INTERSECT, EXCEPT
+ */
+export type SetOperation = "union" | "union all" | "intersect" | "intersect all" | "except" | "except all";
+
+/**
+ * Extended Select type that includes types for set operations (_next and set_op)
+ */
+export type SelectWithSetOp = Select & {
+  set_op?: SetOperation | null;
+  _next?: SelectWithSetOp | null;
+};
+
+/**
  * Extended lineage result that includes both field-level and dataset-level lineage
  */
 export interface ExtendedLineageResult {
@@ -201,6 +214,26 @@ export function isColumn(selectColumn: Select["columns"][number]): selectColumn 
     typeof selectColumn.expr === "object" &&
     selectColumn.expr !== null
   );
+}
+
+/**
+ * Check if a column expression is a star (wildcard) expression like * or table.*
+ */
+export function isStar(column: AstColumn): boolean {
+  if (column.expr.type !== "column_ref") return false;
+  const colRef = column.expr as ColumnRefItem;
+  return colRef.column === "*" || (typeof colRef.column === "object" && colRef.column?.expr?.value === "*");
+}
+
+/**
+ * Get the table qualifier from a star expression (e.g., "u" from "u.*")
+ * Returns null if there's no table qualifier (plain "*")
+ */
+export function getStarTableQualifier(column: AstColumn): string | null {
+  if (!isStar(column)) return null;
+  const colRef = column.expr as ColumnRefItem;
+  if (!colRef.table) return null;
+  return typeof colRef.table === "string" ? colRef.table : (colRef.table as { type: string; value: string }).value;
 }
 
 export function formatInputColumnName(column: ColumnRefItem): string {
@@ -422,7 +455,7 @@ export function getDirectTransformationsFromExprValue(
       const aggExpr = expr as AggrFunc;
 
       const merged: Record<string, TransformationSet> = {};
-      
+
       // Extract lineage from aggregate function arguments
       if (aggExpr.args?.expr) {
         const argTransformations = getDirectTransformationsFromExprValue(
@@ -466,8 +499,7 @@ export function getDirectTransformationsFromExprValue(
             mergeTransformations(parentTransformation, {
               ...DIRECT_TRANSFORMATION,
               masking:
-                funcExpr.name.name.length > 0 &&
-                MASKING_FUNCTIONS.has(funcExpr.name.name.at(-1)!.value.toUpperCase()),
+                funcExpr.name.name.length > 0 && MASKING_FUNCTIONS.has(funcExpr.name.name.at(-1)!.value.toUpperCase()),
             }),
           );
           Object.entries(argTransformations).forEach(([key, value]) => {
@@ -479,9 +511,7 @@ export function getDirectTransformationsFromExprValue(
       // For window functions (function with OVER clause like RANK(), ROW_NUMBER()),
       // extract columns from PARTITION BY/ORDER BY since these functions have no arguments
       if ("over" in funcExpr && funcExpr.over) {
-        const windowExprs = extractWindowExpressionsFromOver(
-          (funcExpr as AstFunction & { over: OverClause }).over,
-        );
+        const windowExprs = extractWindowExpressionsFromOver((funcExpr as AstFunction & { over: OverClause }).over);
         for (const windowExpr of windowExprs) {
           const windowTransformations = getDirectTransformationsFromExprValue(
             windowExpr,
@@ -647,9 +677,7 @@ function extractInputFieldsFromExpressions(
   schema: Schema,
   transformation: Transformation,
 ): InputField[] {
-  return expressions.flatMap((expr) =>
-    extractInputFieldsFromExpression(expr, regularTables, schema, transformation),
-  );
+  return expressions.flatMap((expr) => extractInputFieldsFromExpression(expr, regularTables, schema, transformation));
 }
 
 // ============================================================================
@@ -731,7 +759,50 @@ function normalizeGroupByItems(groupby: Select["groupby"]): ExpressionValue[] {
 }
 
 /**
+ * Build a map of output aliases to their source expressions from SELECT columns.
+ * This allows ORDER BY alias resolution.
+ */
+function buildAliasToExpressionMap(select: Select): Map<string, ExpressionValue> {
+  const aliasMap = new Map<string, ExpressionValue>();
+
+  if (!select.columns || typeof select.columns === "string") {
+    return aliasMap;
+  }
+
+  select.columns.forEach((col) => {
+    if (!isColumn(col)) return;
+
+    const outputName = getOutputColumnName(col);
+    if (outputName && col.expr) {
+      aliasMap.set(outputName, col.expr);
+    }
+  });
+
+  return aliasMap;
+}
+
+/**
+ * Resolve an ORDER BY expression to its underlying column references.
+ * If the expression is a column reference that matches an alias, resolve it to the aliased expression.
+ */
+function resolveOrderByExpression(expr: ExpressionValue, aliasMap: Map<string, ExpressionValue>): ExpressionValue {
+  // If it's a column_ref, check if it's an alias
+  if (expr.type === "column_ref") {
+    const colRef = expr as ColumnRefItem;
+    const columnName = getInputColumnName(colRef);
+
+    // Only resolve if there's no table qualifier (aliases don't have table qualifiers)
+    if (columnName && !colRef.table && aliasMap.has(columnName)) {
+      return aliasMap.get(columnName)!;
+    }
+  }
+
+  return expr;
+}
+
+/**
  * Extract ORDER BY lineage (SORT)
+ * Resolves alias references to their underlying column expressions.
  */
 export function getOrderByLineage(select: Select, schema: Schema): InputField[] {
   if (!select.orderby) return [];
@@ -739,8 +810,22 @@ export function getOrderByLineage(select: Select, schema: Schema): InputField[] 
   const orderByItems = Array.isArray(select.orderby) ? select.orderby : [select.orderby];
   const { regularTables } = getTableExpressionsFromSelect(select);
 
-  const expressions = orderByItems.map((item) => ("expr" in item ? item.expr : item) as ExpressionValue);
-  return extractInputFieldsFromExpressions(expressions, regularTables, schema, INDIRECT_SORT);
+  // Build alias map to resolve ORDER BY alias references
+  const aliasMap = buildAliasToExpressionMap(select);
+
+  const inputFields: InputField[] = [];
+
+  orderByItems.forEach((item) => {
+    const expr = ("expr" in item ? item.expr : item) as ExpressionValue;
+
+    // Resolve the expression - if it's an alias, get the underlying expression
+    const resolvedExpr = resolveOrderByExpression(expr, aliasMap);
+
+    // Extract input fields from the resolved expression
+    inputFields.push(...extractInputFieldsFromExpression(resolvedExpr, regularTables, schema, INDIRECT_SORT));
+  });
+
+  return inputFields;
 }
 
 /**
@@ -787,7 +872,12 @@ export function getHavingLineage(select: Select, schema: Schema): InputField[] {
   if (!select.having) return [];
 
   const { regularTables } = getTableExpressionsFromSelect(select);
-  return extractInputFieldsFromExpression(select.having as unknown as ExpressionValue, regularTables, schema, INDIRECT_FILTER);
+  return extractInputFieldsFromExpression(
+    select.having as unknown as ExpressionValue,
+    regularTables,
+    schema,
+    INDIRECT_FILTER,
+  );
 }
 
 // ============================================================================
@@ -857,6 +947,118 @@ export function mergeTransformationSet(parent: TransformationSet, child: Transfo
   });
 
   return merged;
+}
+
+/**
+ * Expand a star column into individual columns based on schema and FROM clause.
+ * For "*", returns all columns from all tables in FROM clause.
+ * For "table.*", returns all columns from that specific table.
+ */
+export function expandStarColumn(column: AstColumn, select: Select, schema: Schema): AstColumn[] {
+  if (!isStar(column)) return [column];
+
+  const tableQualifier = getStarTableQualifier(column);
+  const { regularTables, selectTables } = getTableExpressionsFromSelect(select);
+  const expandedColumns: AstColumn[] = [];
+
+  // Process regular tables (from schema)
+  regularTables.forEach((fromTable) => {
+    // If there's a table qualifier, skip tables that don't match
+    if (tableQualifier && tableQualifier !== fromTable.table && tableQualifier !== fromTable.as) {
+      return;
+    }
+
+    const schemaTable = schema.tables.find((t) => t.name === fromTable.table);
+    if (!schemaTable) return;
+
+    for (const colName of schemaTable.columns) {
+      expandedColumns.push({
+        expr: {
+          type: "column_ref",
+          table: fromTable.as ?? fromTable.table,
+          column: colName,
+        } as ExpressionValue,
+        as: colName,
+      });
+    }
+  });
+
+  // Process subquery/CTE tables
+  selectTables.forEach((selectTable) => {
+    // If there's a table qualifier, skip tables that don't match
+    if (tableQualifier && tableQualifier !== selectTable.as) {
+      return;
+    }
+
+    // Get columns from the subquery/CTE
+    if (selectTable.columns && typeof selectTable.columns !== "string") {
+      selectTable.columns.forEach((subCol) => {
+        if (!isColumn(subCol)) return;
+
+        // Handle star in subquery recursively
+        if (isStar(subCol)) {
+          const expandedSubCols = expandStarColumn(subCol, selectTable, schema);
+          expandedSubCols.forEach((expandedSubCol) => {
+            const outputName = getOutputColumnName(expandedSubCol);
+            if (outputName) {
+              expandedColumns.push({
+                expr: {
+                  type: "column_ref",
+                  table: selectTable.as ?? null,
+                  column: outputName,
+                } as unknown as ExpressionValue,
+                as: outputName,
+              });
+            }
+          });
+        } else {
+          const outputName = getOutputColumnName(subCol);
+          if (outputName) {
+            expandedColumns.push({
+              expr: {
+                type: "column_ref",
+                table: selectTable.as ?? null,
+                column: outputName,
+              } as unknown as ExpressionValue,
+              as: outputName,
+            });
+          }
+        }
+      });
+    }
+  });
+
+  return expandedColumns;
+}
+
+// ============================================================================
+// Set Operation Helpers
+// ============================================================================
+
+/**
+ * Check if a SELECT has set operations (UNION, INTERSECT, EXCEPT)
+ */
+export function hasSetOperation(select: Select): select is SelectWithSetOp {
+  return "set_op" in select && select.set_op != null;
+}
+
+/**
+ * Get all SELECT statements in a set operation chain.
+ * Returns an array of SELECT statements, where the first element is the base select
+ * and subsequent elements are the _next selects in the chain.
+ */
+export function getSetOperationSelects(select: Select): Select[] {
+  const selects: Select[] = [select];
+
+  if (hasSetOperation(select)) {
+    let current: SelectWithSetOp | null | undefined = select._next;
+    while (current) {
+      selects.push(current as Select);
+      current = hasSetOperation(current) ? current._next : null;
+    }
+  }
+
+  return selects;
 }
 
 // ============================================================================
@@ -934,10 +1136,9 @@ export function getColumnLineage(
 }
 
 /**
- * Get all dataset-level indirect lineage (columns that affect the entire result set)
- * This includes lineage from CTEs and subqueries that contribute to the final result.
+ * Get dataset-level indirect lineage for a single SELECT (without following set operations)
  */
-export function getDatasetLineage(select: Select, schema: Schema): InputField[] {
+function getDatasetLineageForSingleSelect(select: Select, schema: Schema): InputField[] {
   const allIndirectFields: InputField[] = [];
 
   // Collect all indirect lineage from the outermost SELECT
@@ -954,6 +1155,23 @@ export function getDatasetLineage(select: Select, schema: Schema): InputField[] 
     allIndirectFields.push(...getDatasetLineage(selectTable, schema));
   }
 
+  return allIndirectFields;
+}
+
+/**
+ * Get all dataset-level indirect lineage (columns that affect the entire result set)
+ * This includes lineage from CTEs, subqueries, and set operations (UNION, INTERSECT, EXCEPT)
+ * that contribute to the final result.
+ */
+export function getDatasetLineage(select: Select, schema: Schema): InputField[] {
+  const allIndirectFields: InputField[] = [];
+
+  // Handle set operations (UNION, INTERSECT, EXCEPT)
+  const setOpSelects = getSetOperationSelects(select);
+  setOpSelects.forEach((setOpSelect) => {
+    allIndirectFields.push(...getDatasetLineageForSingleSelect(setOpSelect, schema));
+  });
+
   // Deduplicate by creating a map keyed by namespace.table.field.type.subtype
   const deduped = new Map<string, InputField>();
   for (const field of allIndirectFields) {
@@ -968,29 +1186,115 @@ export function getDatasetLineage(select: Select, schema: Schema): InputField[] 
 }
 
 /**
- * Main lineage extraction function - returns field-level lineage only (backward compatible)
+ * Get field-level lineage for a single SELECT (without following set operations)
  */
-export function getLineage(select: Select, schema: Schema): ColumnLineageDatasetFacet["fields"] {
+function getLineageForSingleSelect(select: Select, schema: Schema): ColumnLineageDatasetFacet["fields"] {
   let unknownCount = 0;
 
-  return select.columns.reduce((acc, column) => {
-    if (!isColumn(column)) {
-      return acc;
+  // Handle the case where columns is the string "*" (entire result is star)
+  if (typeof select.columns === "string" && select.columns === "*") {
+    return {};
+  }
+
+  return select.columns.reduce(
+    (acc, column) => {
+      if (!isColumn(column)) {
+        return acc;
+      }
+
+      // Expand star columns into individual columns
+      if (isStar(column)) {
+        const expandedColumns = expandStarColumn(column, select, schema);
+        expandedColumns.forEach((expandedCol) => {
+          let outputFieldName = getOutputColumnName(expandedCol);
+          if (!outputFieldName) {
+            outputFieldName = `unknown_${unknownCount++}`;
+          }
+          acc = {
+            ...acc,
+            [outputFieldName]: {
+              inputFields: getColumnLineage(select, schema, expandedCol),
+            },
+          };
+        });
+
+        return acc;
+      }
+
+      let outputFieldName = getOutputColumnName(column);
+
+      if (!outputFieldName) {
+        outputFieldName = `unknown_${unknownCount++}`;
+      }
+
+      return {
+        ...acc,
+        [outputFieldName]: {
+          inputFields: getColumnLineage(select, schema, column),
+        },
+      };
+    },
+    {} as ColumnLineageDatasetFacet["fields"],
+  );
+}
+
+/**
+ * Merge input fields from multiple sources, deduplicating by field identity
+ */
+function mergeInputFields(existing: InputField[], incoming: InputField[]): InputField[] {
+  const hasher = (value: InputField) => {
+    const transformationsString =
+      value.transformations?.map((t) => transformationHasher(t as Transformation)).join("-") ?? "";
+    return `${value.namespace}-${value.name}-${value.field}-${transformationsString}`;
+  };
+  const mergedMap = new Map(existing.map((field) => [hasher(field), field] as const, {}));
+
+  incoming.forEach((field) => mergedMap.set(hasher(field), field));
+
+  return [...mergedMap.values()];
+}
+
+/**
+ * Main lineage extraction function - returns field-level lineage only (backward compatible)
+ * Handles set operations (UNION, INTERSECT, EXCEPT) by merging lineages from all parts.
+ * Output column names are determined by the first SELECT in the set operation.
+ */
+export function getLineage(select: Select, schema: Schema): ColumnLineageDatasetFacet["fields"] {
+  // Get all SELECT statements in the set operation chain
+  const setOpSelects = getSetOperationSelects(select);
+
+  // Get lineage from the first SELECT (determines output column names)
+  const baseLineage = getLineageForSingleSelect(setOpSelects[0]!, schema);
+
+  // If no set operations, return base lineage
+  if (setOpSelects.length === 1) {
+    return baseLineage;
+  }
+
+  // Merge lineages from subsequent SELECTs in the set operation
+  // Output columns are matched by position, not name
+  const baseColumns = Object.keys(baseLineage);
+
+  for (let i = 1; i < setOpSelects.length; i++) {
+    const nextSelect = setOpSelects[i]!;
+    const nextLineage = getLineageForSingleSelect(nextSelect, schema);
+    const nextColumns = Object.keys(nextLineage);
+
+    // Match columns by position and merge input fields
+    for (let j = 0; j < baseColumns.length && j < nextColumns.length; j++) {
+      const baseCol = baseColumns[j]!;
+      const nextCol = nextColumns[j]!;
+
+      if (baseLineage[baseCol] && nextLineage[nextCol]) {
+        baseLineage[baseCol]!.inputFields = mergeInputFields(
+          baseLineage[baseCol]!.inputFields,
+          nextLineage[nextCol]!.inputFields,
+        );
+      }
     }
+  }
 
-    let outputFieldName = getOutputColumnName(column);
-
-    if (!outputFieldName) {
-      outputFieldName = `unknown_${unknownCount++}`;
-    }
-
-    return {
-      ...acc,
-      [outputFieldName]: {
-        inputFields: getColumnLineage(select, schema, column),
-      },
-    };
-  }, {});
+  return baseLineage;
 }
 
 /**

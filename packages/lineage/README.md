@@ -120,6 +120,7 @@ const result = getExtendedLineage(ast, schema);
 ### ✅ Currently Supported
 
 - Basic SELECT statements
+- `SELECT *` and `table.*` expansion (requires schema)
 - Column aliases (`SELECT id as user_id`)
 - Common Table Expressions (CTEs) with lineage propagation
 - Nested subqueries
@@ -134,17 +135,16 @@ const result = getExtendedLineage(ast, schema);
 - String functions (`SELECT UPPER(name)`)
 - Date functions (`SELECT DATE_TRUNC('month', created_at)`)
 - Masking functions (`MD5`, `SHA256`, `HASH`, `MASK`, `ANONYMIZE`, etc.)
+- **Set operations** (`UNION`, `UNION ALL`, `INTERSECT`, `EXCEPT`)
+- **All JOIN types** (`INNER`, `LEFT`, `RIGHT`, `FULL OUTER`, `CROSS`)
 
 ### 🔄 In Progress
 
-- UNION and INTERSECT operations
 - More complex recursive CTE patterns
 
 ### 📋 Planned
 
-- FULL OUTER JOIN support
 - Multi-statement support (DDL operations)
-- `select *` support
 - Additional SQL dialect optimizations
 
 ## API Reference
@@ -199,10 +199,11 @@ type Transformation = {
 - Window function support
 - CTE lineage propagation
 - Masking detection
+- Set operations (UNION, INTERSECT, EXCEPT)
+- All JOIN types (INNER, LEFT, RIGHT, FULL OUTER, CROSS)
 
 ### 🔄 In Progress
 
-- UNION and INTERSECT operations
 - More complex recursive CTE patterns
 
 ### 📋 Planned

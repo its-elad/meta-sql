@@ -47,8 +47,6 @@ export default function App() {
     setLineageData(lineageResult);
   }, []);
 
-  useEffect(() => console.log(lineageData), [lineageData]);
-
   return (
     <div className="min-h-screen bg-background font-[DM Sans]">
       {/* Header */}

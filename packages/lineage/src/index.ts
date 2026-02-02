@@ -192,26 +192,15 @@ export type SelectWithAlias = Select & {
 export type SetOperation = "union" | "union all" | "intersect" | "intersect all" | "except" | "except all";
 
 /**
- * Extended Select type that includes types for set operations (_next and set_op)
- */
-export type SelectWithSetOp = Select & {
-  set_op?: SetOperation | null;
-  _next?: SelectWithSetOp | null;
-};
-
-/**
  * Extended lineage result that includes both field-level and dataset-level lineage
  */
-export interface ExtendedLineageResult {
-  fields: ColumnLineageDatasetFacet["fields"];
-  dataset?: InputField[];
-}
+export type ExtendedLineageResult = Pick<ColumnLineageDatasetFacet, "fields" | "dataset">
 
 // ============================================================================
 // Column Name Utilities
 // ============================================================================
 
-export function isColumn(selectColumn: Select["columns"][number]): selectColumn is AstColumn {
+function isColumn(selectColumn: Select["columns"][number]): selectColumn is AstColumn {
   return (
     typeof selectColumn === "object" &&
     selectColumn !== null &&
@@ -225,7 +214,7 @@ export function isColumn(selectColumn: Select["columns"][number]): selectColumn 
 /**
  * Check if a column expression is a star (wildcard) expression like * or table.*
  */
-export function isStar(column: AstColumn): boolean {
+function isStar(column: AstColumn): boolean {
   if (column.expr.type !== "column_ref") return false;
   const colRef = column.expr as ColumnRefItem;
   return colRef.column === "*" || (typeof colRef.column === "object" && colRef.column?.expr?.value === "*");
@@ -235,7 +224,7 @@ export function isStar(column: AstColumn): boolean {
  * Get the table qualifier from a star expression (e.g., "u" from "u.*")
  * Returns null if there's no table qualifier (plain "*")
  */
-export function getStarTableQualifier(column: AstColumn): string | null {
+function getStarTableQualifier(column: AstColumn): string | null {
   if (!isStar(column)) return null;
   const colRef = column.expr as ColumnRefItem;
   if (!colRef.table) return null;
@@ -269,17 +258,16 @@ export function parseTableName(tableName: string): { schema: string; table: stri
  * Check if an AST table reference matches a schema table
  * Takes into account the db property from AST and the defaultSchema from namespace
  */
-function astTableMatchesSchemaTable(
-  astTable: BaseFrom,
-  schemaTableName: string,
-  defaultSchema?: string,
-): boolean {
+function astTableMatchesSchemaTable(astTable: BaseFrom, schemaTableName: string, defaultSchema?: string): boolean {
   const parsed = parseTableName(schemaTableName);
-  const astDb = (astTable as BaseFrom & { db?: string }).db;
-  const effectiveAstSchema = astDb || defaultSchema || "";
+  const astDb = astTable.db;
+  const effectiveAstSchema = astDb || defaultSchema;
 
   // Compare schema (or default schema if not specified)
-  if (parsed.schema && effectiveAstSchema && parsed.schema !== effectiveAstSchema) {
+  if (
+    (parsed.schema && !defaultSchema && !astDb) ||
+    (parsed.schema && effectiveAstSchema && parsed.schema !== effectiveAstSchema)
+  ) {
     return false;
   }
 
@@ -308,7 +296,7 @@ export function getOutputColumnName(column: AstColumn): string | null {
 /**
  * Extract column references from any expression value
  */
-export function extractColumnRefs(expr: ExpressionValue | null | undefined): ColumnRefItem[] {
+function extractColumnRefs(expr: ExpressionValue | null | undefined): ColumnRefItem[] {
   if (!expr) return [];
 
   const refs: ColumnRefItem[] = [];
@@ -449,7 +437,7 @@ function extractWindowExpressionsFromOver(over: OverClause): ExpressionValue[] {
 /**
  * Get transformations from expression, supporting CASE/IF for CONDITION subtype
  */
-export function getDirectTransformationsFromExprValue(
+function getDirectTransformationsFromExprValue(
   expr: ExpressionValue,
   parentTransformation?: Transformation,
 ): Record<string, TransformationSet> {
@@ -625,7 +613,7 @@ export function getDirectTransformationsFromExprValue(
 /**
  * Get indirect transformations from an expression with a specific transformation type
  */
-export function getIndirectTransformationsFromExpr(
+function getIndirectTransformationsFromExpr(
   expr: ExpressionValue | null | undefined,
   transformation: Transformation,
 ): Record<string, TransformationSet> {
@@ -667,7 +655,9 @@ function resolveColumnRefToInputField(
   const table = regularTables.find(
     (t) =>
       (!tableName || tableName === t.table || tableName === t.as) &&
-      namespace.tables!.some((s) => astTableMatchesSchemaTable(t, s.name, namespace.defaultSchema) && s.columns.includes(columnName)),
+      namespace.tables!.some(
+        (s) => astTableMatchesSchemaTable(t, s.name, namespace.defaultSchema) && s.columns.includes(columnName),
+      ),
   );
 
   if (!table) return null;
@@ -717,7 +707,9 @@ function extractInputFieldsFromExpressions(
   namespace: Namespace,
   transformation: Transformation,
 ): InputField[] {
-  return expressions.flatMap((expr) => extractInputFieldsFromExpression(expr, regularTables, namespace, transformation));
+  return expressions.flatMap((expr) =>
+    extractInputFieldsFromExpression(expr, regularTables, namespace, transformation),
+  );
 }
 
 // ============================================================================
@@ -727,7 +719,7 @@ function extractInputFieldsFromExpressions(
 /**
  * Extract JOIN lineage from FROM clause (ON and USING conditions)
  */
-export function getJoinLineage(select: Select, namespace: Namespace): InputField[] {
+function getJoinLineage(select: Select, namespace: Namespace): InputField[] {
   if (!select.from) return [];
   if (!namespace.tables) return [];
 
@@ -749,7 +741,7 @@ export function getJoinLineage(select: Select, namespace: Namespace): InputField
         // Find tables that match the FROM clause and have this column
         for (const schemaTable of namespace.tables) {
           const matchingFromTable = regularTables.find((t) =>
-            astTableMatchesSchemaTable(t, schemaTable.name, namespace.defaultSchema)
+            astTableMatchesSchemaTable(t, schemaTable.name, namespace.defaultSchema),
           );
           if (matchingFromTable && schemaTable.columns.includes(usingCol)) {
             inputFields.push({
@@ -770,7 +762,7 @@ export function getJoinLineage(select: Select, namespace: Namespace): InputField
 /**
  * Extract WHERE clause lineage (FILTER)
  */
-export function getFilterLineage(select: Select, namespace: Namespace): InputField[] {
+function getFilterLineage(select: Select, namespace: Namespace): InputField[] {
   if (!select.where) return [];
 
   const { regularTables } = getTableExpressionsFromSelect(select);
@@ -780,7 +772,7 @@ export function getFilterLineage(select: Select, namespace: Namespace): InputFie
 /**
  * Extract GROUP BY lineage
  */
-export function getGroupByLineage(select: Select, namespace: Namespace): InputField[] {
+function getGroupByLineage(select: Select, namespace: Namespace): InputField[] {
   if (!select.groupby) return [];
 
   // Normalize GROUP BY to array format
@@ -849,7 +841,7 @@ function resolveOrderByExpression(expr: ExpressionValue, aliasMap: Map<string, E
  * Extract ORDER BY lineage (SORT)
  * Resolves alias references to their underlying column expressions.
  */
-export function getOrderByLineage(select: Select, namespace: Namespace): InputField[] {
+function getOrderByLineage(select: Select, namespace: Namespace): InputField[] {
   if (!select.orderby) return [];
 
   const orderByItems = Array.isArray(select.orderby) ? select.orderby : [select.orderby];
@@ -876,7 +868,7 @@ export function getOrderByLineage(select: Select, namespace: Namespace): InputFi
 /**
  * Extract WINDOW function lineage from SELECT columns (PARTITION BY and ORDER BY in OVER clause)
  */
-export function getWindowLineage(select: Select, namespace: Namespace): InputField[] {
+function getWindowLineage(select: Select, namespace: Namespace): InputField[] {
   if (!select.columns || (typeof select.columns === "string" && select.columns === "*")) {
     return [];
   }
@@ -913,7 +905,7 @@ function extractWindowExpressions(expr: ExpressionValue): ExpressionValue[] {
 /**
  * Extract HAVING clause lineage (FILTER in aggregation context)
  */
-export function getHavingLineage(select: Select, namespace: Namespace): InputField[] {
+function getHavingLineage(select: Select, namespace: Namespace): InputField[] {
   if (!select.having) return [];
 
   const { regularTables } = getTableExpressionsFromSelect(select);
@@ -929,7 +921,7 @@ export function getHavingLineage(select: Select, namespace: Namespace): InputFie
 // Table Expression Helpers
 // ============================================================================
 
-export function getTableExpressionsFromSelect(select: Select): {
+function getTableExpressionsFromSelect(select: Select): {
   regularTables: BaseFrom[];
   selectTables: SelectWithAlias[];
 } {
@@ -982,7 +974,7 @@ export function getTableExpressionsFromSelect(select: Select): {
   return { regularTables, selectTables };
 }
 
-export function mergeTransformationSet(parent: TransformationSet, child: TransformationSet): TransformationSet {
+function mergeTransformationSet(parent: TransformationSet, child: TransformationSet): TransformationSet {
   const merged = new TransformationSet();
 
   parent.forEach((tp) => {
@@ -999,7 +991,7 @@ export function mergeTransformationSet(parent: TransformationSet, child: Transfo
  * For "*", returns all columns from all tables in FROM clause.
  * For "table.*", returns all columns from that specific table.
  */
-export function expandStarColumn(column: AstColumn, select: Select, namespace: Namespace): AstColumn[] {
+function expandStarColumn(column: AstColumn, select: Select, namespace: Namespace): AstColumn[] {
   if (!isStar(column)) return [column];
   if (!namespace.tables) return [column];
 
@@ -1014,7 +1006,9 @@ export function expandStarColumn(column: AstColumn, select: Select, namespace: N
       return;
     }
 
-    const schemaTable = namespace.tables!.find((t) => astTableMatchesSchemaTable(fromTable, t.name, namespace.defaultSchema));
+    const schemaTable = namespace.tables!.find((t) =>
+      astTableMatchesSchemaTable(fromTable, t.name, namespace.defaultSchema),
+    );
     if (!schemaTable) return;
 
     for (const colName of schemaTable.columns) {
@@ -1084,7 +1078,7 @@ export function expandStarColumn(column: AstColumn, select: Select, namespace: N
 /**
  * Check if a SELECT has set operations (UNION, INTERSECT, EXCEPT)
  */
-export function hasSetOperation(select: Select): select is SelectWithSetOp {
+function hasSetOperation(select: Select): select is Select {
   return "set_op" in select && select.set_op != null;
 }
 
@@ -1093,13 +1087,13 @@ export function hasSetOperation(select: Select): select is SelectWithSetOp {
  * Returns an array of SELECT statements, where the first element is the base select
  * and subsequent elements are the _next selects in the chain.
  */
-export function getSetOperationSelects(select: Select): Select[] {
+function getSetOperationSelects(select: Select): Select[] {
   const selects: Select[] = [select];
 
   if (hasSetOperation(select)) {
-    let current: SelectWithSetOp | null | undefined = select._next;
+    let current: Select | undefined | null = select._next;
     while (current) {
-      selects.push(current as Select);
+      selects.push(current);
       current = hasSetOperation(current) ? current._next : null;
     }
   }
@@ -1142,11 +1136,15 @@ export function getColumnLineage(
     const table = regularTables.find(
       (t) =>
         (!inputColumn.table || inputColumn.table === t.table || inputColumn.table === t.as) &&
-        namespace.tables!.some((s) => astTableMatchesSchemaTable(t, s.name, namespace.defaultSchema) && s.columns.includes(inputColumn.name)),
+        namespace.tables!.some(
+          (s) => astTableMatchesSchemaTable(t, s.name, namespace.defaultSchema) && s.columns.includes(inputColumn.name),
+        ),
     );
 
     if (table) {
-      const schemaTable = namespace.tables.find((s) => astTableMatchesSchemaTable(table, s.name, namespace.defaultSchema));
+      const schemaTable = namespace.tables.find((s) =>
+        astTableMatchesSchemaTable(table, s.name, namespace.defaultSchema),
+      );
       inputFields.push({
         namespace: namespace.namespace,
         name: schemaTable!.name,

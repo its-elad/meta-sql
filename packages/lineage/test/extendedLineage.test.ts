@@ -10,15 +10,32 @@ import {
   INDIRECT_GROUP_BY,
   INDIRECT_SORT,
   INDIRECT_WINDOW,
+  INDIRECT_CONDITION,
   DIRECT_IDENTITY,
   DIRECT_TRANSFORMATION,
   DIRECT_AGGREGATION,
 } from "../src/index.js";
 
+const DEFAULT_SCHEMA = "public";
+const USERS_TABLE = createTable(`${DEFAULT_SCHEMA}.users`, [
+  "id",
+  "name",
+  "email",
+  "first_name",
+  "last_name",
+  "status",
+  "age",
+  "country",
+  "city",
+  "region",
+  "verified",
+  "active",
+  "created_at",
+]);
+
 const parser = new Parser();
 
-// Helper function to create namespaces
-function createNamespace(namespace: string, tables: Table[], defaultSchema?: string): Namespace {
+function createNamespace(namespace: string, tables: Table[], defaultSchema: string = DEFAULT_SCHEMA): Namespace {
   return { namespace, tables, defaultSchema };
 }
 
@@ -26,128 +43,488 @@ function createTable(name: string, columns: string[]): Table {
   return { name, columns };
 }
 
-// Helper to ensure we get a single AST
-function parseSQL(sql: string): AST {
-  const result = parser.astify(sql, { database: "trino" });
+function parseSQL(sql: string, database: "trino" | "postgresql" = "trino"): AST {
+  const result = parser.astify(sql, { database });
   const ast = Array.isArray(result) ? result[0] : result;
-
-  if (!ast) {
-    throw new Error("Failed to parse SQL");
-  }
-
+  if (!ast) throw new Error("Failed to parse SQL");
   return ast;
 }
 
-// Helper to find dataset lineage entries by transformation subtype
-function findBySubtype(dataset: ReturnType<typeof getExtendedLineage>["dataset"], subtype: string) {
-  return dataset?.filter((f) => f.transformations?.[0]?.subtype === subtype) ?? [];
+// =============================================================================
+// EXACT ASSERTION HELPERS
+// =============================================================================
+
+/** Sort input fields for consistent comparison */
+function sortInputFields(fields: ReturnType<typeof getExtendedLineage>["fields"]) {
+  const sorted: typeof fields = {};
+  for (const [key, value] of Object.entries(fields)) {
+    sorted[key] = {
+      inputFields: [...value.inputFields].sort((a, b) => {
+        const aKey = `${a.namespace}.${a.name}.${a.field}`;
+        const bKey = `${b.namespace}.${b.name}.${b.field}`;
+        return aKey.localeCompare(bKey);
+      }),
+    };
+  }
+  return sorted;
 }
 
-// Helper to find dataset lineage entry by field name and subtype
-function findFieldBySubtype(
-  dataset: ReturnType<typeof getExtendedLineage>["dataset"],
-  fieldName: string,
-  subtype: string,
-) {
-  return dataset?.find((f) => f.field === fieldName && f.transformations?.[0]?.subtype === subtype);
+/** Sort dataset fields for consistent comparison */
+function sortDataset(dataset: ReturnType<typeof getExtendedLineage>["dataset"]) {
+  if (!dataset) return [];
+  return [...dataset].sort((a, b) => {
+    const aKey = `${a.namespace}.${a.name}.${a.field}.${a.transformations?.[0]?.subtype}`;
+    const bKey = `${b.namespace}.${b.name}.${b.field}.${b.transformations?.[0]?.subtype}`;
+    return aKey.localeCompare(bKey);
+  });
 }
 
 // =============================================================================
-// SIMPLE TESTS - Single Clause Scenarios
+// SECTION 1: FIELD-LEVEL LINEAGE - DIRECT TRANSFORMATIONS
 // =============================================================================
 
-describe("getExtendedLineage - Simple SELECT (no indirect lineage)", () => {
-  test("simple select without any indirect clauses", () => {
-    const sql = `SELECT id, name FROM users`;
-
+describe("Field-Level Lineage: DIRECT/IDENTITY", () => {
+  test("single column select", () => {
+    const sql = `SELECT id FROM users`;
     const ast = parseSQL(sql);
-    const schema = createNamespace("trino", [createTable("users", ["id", "name", "email"])]);
-
+    const schema = createNamespace("ns", [USERS_TABLE]);
     const result = getExtendedLineage(ast as Select, schema);
 
-    // Field-level lineage should exist
-    expect(result.fields.id).toBeDefined();
-    expect(result.fields.name).toBeDefined();
-    expect(result.fields.id?.inputFields).toContainEqual({
-      namespace: "trino",
-      name: "users",
-      field: "id",
-      transformations: [DIRECT_IDENTITY],
+    expect(result.fields).toEqual({
+      id: {
+        inputFields: [{ namespace: "ns", name: USERS_TABLE.name, field: "id", transformations: [DIRECT_IDENTITY] }],
+      },
     });
-    expect(result.fields.name?.inputFields).toContainEqual({
-      namespace: "trino",
-      name: "users",
-      field: "name",
-      transformations: [DIRECT_IDENTITY],
-    });
-
-    // Dataset-level lineage should be empty
     expect(result.dataset).toEqual([]);
   });
 
-  test("select with alias", () => {
-    const sql = `SELECT id as user_id, name as user_name FROM users`;
-
+  test("multiple columns select", () => {
+    const sql = `SELECT id, name, email FROM users`;
     const ast = parseSQL(sql);
-    const schema = createNamespace("trino", [createTable("users", ["id", "name"])]);
-
+    const schema = createNamespace("ns", [USERS_TABLE]);
     const result = getExtendedLineage(ast as Select, schema);
 
-    expect(result.fields.user_id?.inputFields).toContainEqual({
-      namespace: "trino",
-      name: "users",
-      field: "id",
-      transformations: [DIRECT_IDENTITY],
-    });
-    expect(result.fields.user_name?.inputFields).toContainEqual({
-      namespace: "trino",
-      name: "users",
-      field: "name",
-      transformations: [DIRECT_IDENTITY],
+    expect(result.fields).toEqual({
+      id: {
+        inputFields: [{ namespace: "ns", name: USERS_TABLE.name, field: "id", transformations: [DIRECT_IDENTITY] }],
+      },
+      name: {
+        inputFields: [{ namespace: "ns", name: USERS_TABLE.name, field: "name", transformations: [DIRECT_IDENTITY] }],
+      },
+      email: {
+        inputFields: [{ namespace: "ns", name: USERS_TABLE.name, field: "email", transformations: [DIRECT_IDENTITY] }],
+      },
     });
     expect(result.dataset).toEqual([]);
+  });
+
+  test("column with alias", () => {
+    const sql = `SELECT id as user_id, name as user_name FROM users`;
+    const ast = parseSQL(sql);
+    const schema = createNamespace("ns", [USERS_TABLE]);
+    const result = getExtendedLineage(ast as Select, schema);
+
+    expect(result.fields).toEqual({
+      user_id: {
+        inputFields: [{ namespace: "ns", name: USERS_TABLE.name, field: "id", transformations: [DIRECT_IDENTITY] }],
+      },
+      user_name: {
+        inputFields: [{ namespace: "ns", name: USERS_TABLE.name, field: "name", transformations: [DIRECT_IDENTITY] }],
+      },
+    });
+  });
+
+  test("table-qualified column", () => {
+    const sql = `SELECT u.id, u.name FROM users u`;
+    const ast = parseSQL(sql);
+    const schema = createNamespace("ns", [USERS_TABLE]);
+    const result = getExtendedLineage(ast as Select, schema);
+
+    expect(result.fields).toEqual({
+      id: {
+        inputFields: [{ namespace: "ns", name: USERS_TABLE.name, field: "id", transformations: [DIRECT_IDENTITY] }],
+      },
+      name: {
+        inputFields: [{ namespace: "ns", name: USERS_TABLE.name, field: "name", transformations: [DIRECT_IDENTITY] }],
+      },
+    });
   });
 });
 
-describe("getExtendedLineage - JOIN only", () => {
+describe("Field-Level Lineage: DIRECT/TRANSFORMATION", () => {
+  test("function transformation - UPPER", () => {
+    const sql = `SELECT UPPER(name) as upper_name FROM users`;
+    const ast = parseSQL(sql);
+    const schema = createNamespace("ns", [USERS_TABLE]);
+    const result = getExtendedLineage(ast as Select, schema);
+
+    expect(result.fields).toEqual({
+      upper_name: {
+        inputFields: [
+          { namespace: "ns", name: USERS_TABLE.name, field: "name", transformations: [DIRECT_TRANSFORMATION] },
+        ],
+      },
+    });
+  });
+
+  test("function transformation - CONCAT", () => {
+    const sql = `SELECT CONCAT(first_name, last_name) as full_name FROM users`;
+    const ast = parseSQL(sql);
+    const schema = createNamespace("ns", [USERS_TABLE]);
+    const result = getExtendedLineage(ast as Select, schema);
+
+    expect(sortInputFields(result.fields)).toEqual(
+      sortInputFields({
+        full_name: {
+          inputFields: [
+            { namespace: "ns", name: USERS_TABLE.name, field: "first_name", transformations: [DIRECT_TRANSFORMATION] },
+            { namespace: "ns", name: USERS_TABLE.name, field: "last_name", transformations: [DIRECT_TRANSFORMATION] },
+          ],
+        },
+      }),
+    );
+  });
+
+  test("arithmetic transformation - addition", () => {
+    const sql = `SELECT price + tax as total FROM products`;
+    const ast = parseSQL(sql);
+    const schema = createNamespace("ns", [createTable(`${DEFAULT_SCHEMA}.products`, ["price", "tax"])]);
+    const result = getExtendedLineage(ast as Select, schema);
+
+    expect(sortInputFields(result.fields)).toEqual(
+      sortInputFields({
+        total: {
+          inputFields: [
+            { namespace: "ns", name: `${DEFAULT_SCHEMA}.products`, field: "price", transformations: [DIRECT_TRANSFORMATION] },
+            { namespace: "ns", name: `${DEFAULT_SCHEMA}.products`, field: "tax", transformations: [DIRECT_TRANSFORMATION] },
+          ],
+        },
+      }),
+    );
+  });
+
+  test("arithmetic transformation - multiplication", () => {
+    const sql = `SELECT quantity * unit_price as line_total FROM order_items`;
+    const ast = parseSQL(sql);
+    const schema = createNamespace("ns", [createTable(`${DEFAULT_SCHEMA}.order_items`, ["quantity", "unit_price"])]);
+    const result = getExtendedLineage(ast as Select, schema);
+
+    expect(sortInputFields(result.fields)).toEqual(
+      sortInputFields({
+        line_total: {
+          inputFields: [
+            {
+              namespace: "ns",
+              name: `${DEFAULT_SCHEMA}.order_items`,
+              field: "quantity",
+              transformations: [DIRECT_TRANSFORMATION],
+            },
+            {
+              namespace: "ns",
+              name: `${DEFAULT_SCHEMA}.order_items`,
+              field: "unit_price",
+              transformations: [DIRECT_TRANSFORMATION],
+            },
+          ],
+        },
+      }),
+    );
+  });
+
+  test("CAST transformation", () => {
+    const sql = `SELECT CAST(price AS VARCHAR) as price_str FROM products`;
+    const ast = parseSQL(sql);
+    const schema = createNamespace("ns", [createTable(`${DEFAULT_SCHEMA}.products`, ["price"])]);
+    const result = getExtendedLineage(ast as Select, schema);
+
+    expect(result.fields).toEqual({
+      price_str: {
+        inputFields: [
+          { namespace: "ns", name: `${DEFAULT_SCHEMA}.products`, field: "price", transformations: [DIRECT_TRANSFORMATION] },
+        ],
+      },
+    });
+  });
+
+  test("nested function transformation", () => {
+    const sql = `SELECT LOWER(TRIM(name)) as clean_name FROM users`;
+    const ast = parseSQL(sql);
+    const schema = createNamespace("ns", [USERS_TABLE]);
+    const result = getExtendedLineage(ast as Select, schema);
+
+    expect(result.fields).toEqual({
+      clean_name: {
+        inputFields: [
+          { namespace: "ns", name: USERS_TABLE.name, field: "name", transformations: [DIRECT_TRANSFORMATION] },
+        ],
+      },
+    });
+  });
+});
+
+describe("Field-Level Lineage: DIRECT/AGGREGATION", () => {
+  test("SUM aggregation", () => {
+    const sql = `SELECT SUM(amount) as total FROM transactions`;
+    const ast = parseSQL(sql);
+    const schema = createNamespace("ns", [createTable(`${DEFAULT_SCHEMA}.transactions`, ["amount"])]);
+    const result = getExtendedLineage(ast as Select, schema);
+
+    expect(result.fields).toEqual({
+      total: {
+        inputFields: [
+          { namespace: "ns", name: `${DEFAULT_SCHEMA}.transactions`, field: "amount", transformations: [DIRECT_AGGREGATION] },
+        ],
+      },
+    });
+  });
+
+  test("AVG aggregation", () => {
+    const sql = `SELECT AVG(salary) as avg_salary FROM employees`;
+    const ast = parseSQL(sql);
+    const schema = createNamespace("ns", [createTable(`${DEFAULT_SCHEMA}.employees`, ["salary"])]);
+    const result = getExtendedLineage(ast as Select, schema);
+
+    expect(result.fields).toEqual({
+      avg_salary: {
+        inputFields: [
+          { namespace: "ns", name: `${DEFAULT_SCHEMA}.employees`, field: "salary", transformations: [DIRECT_AGGREGATION] },
+        ],
+      },
+    });
+  });
+
+  test("MIN aggregation", () => {
+    const sql = `SELECT MIN(price) as min_price FROM products`;
+    const ast = parseSQL(sql);
+    const schema = createNamespace("ns", [createTable(`${DEFAULT_SCHEMA}.products`, ["price"])]);
+    const result = getExtendedLineage(ast as Select, schema);
+
+    expect(result.fields).toEqual({
+      min_price: {
+        inputFields: [
+          { namespace: "ns", name: `${DEFAULT_SCHEMA}.products`, field: "price", transformations: [DIRECT_AGGREGATION] },
+        ],
+      },
+    });
+  });
+
+  test("MAX aggregation", () => {
+    const sql = `SELECT MAX(created_at) as latest FROM events`;
+    const ast = parseSQL(sql);
+    const schema = createNamespace("ns", [createTable(`${DEFAULT_SCHEMA}.events`, ["created_at"])]);
+    const result = getExtendedLineage(ast as Select, schema);
+
+    expect(result.fields).toEqual({
+      latest: {
+        inputFields: [
+          { namespace: "ns", name: `${DEFAULT_SCHEMA}.events`, field: "created_at", transformations: [DIRECT_AGGREGATION] },
+        ],
+      },
+    });
+  });
+
+  test("COUNT with column - has masking", () => {
+    const sql = `SELECT COUNT(id) as count FROM users`;
+    const ast = parseSQL(sql);
+    const schema = createNamespace("ns", [USERS_TABLE]);
+    const result = getExtendedLineage(ast as Select, schema);
+
+    expect(result.fields).toEqual({
+      count: {
+        inputFields: [
+          {
+            namespace: "ns",
+            name: USERS_TABLE.name,
+            field: "id",
+            transformations: [{ type: "DIRECT", subtype: "AGGREGATION", masking: true }],
+          },
+        ],
+      },
+    });
+  });
+
+  test("COUNT DISTINCT - has masking", () => {
+    const sql = `SELECT COUNT(DISTINCT user_id) as unique_users FROM orders`;
+    const ast = parseSQL(sql);
+    const schema = createNamespace("ns", [createTable(`${DEFAULT_SCHEMA}.orders`, ["user_id"])]);
+    const result = getExtendedLineage(ast as Select, schema);
+
+    expect(result.fields).toEqual({
+      unique_users: {
+        inputFields: [
+          {
+            namespace: "ns",
+            name: `${DEFAULT_SCHEMA}.orders`,
+            field: "user_id",
+            transformations: [{ type: "DIRECT", subtype: "AGGREGATION", masking: true }],
+          },
+        ],
+      },
+    });
+  });
+
+  test("aggregation with expression inside", () => {
+    const sql = `SELECT SUM(quantity * price) as revenue FROM order_items`;
+    const ast = parseSQL(sql);
+    const schema = createNamespace("ns", [createTable(`${DEFAULT_SCHEMA}.order_items`, ["quantity", "price"])]);
+    const result = getExtendedLineage(ast as Select, schema);
+
+    expect(sortInputFields(result.fields)).toEqual(
+      sortInputFields({
+        revenue: {
+          inputFields: [
+            { namespace: "ns", name: `${DEFAULT_SCHEMA}.order_items`, field: "price", transformations: [DIRECT_AGGREGATION] },
+            { namespace: "ns", name: `${DEFAULT_SCHEMA}.order_items`, field: "quantity", transformations: [DIRECT_AGGREGATION] },
+          ],
+        },
+      }),
+    );
+  });
+});
+
+describe("Field-Level Lineage: Masking Functions", () => {
+  test("MD5 masking", () => {
+    const sql = `SELECT MD5(email) as hashed_email FROM users`;
+    const ast = parseSQL(sql);
+    const schema = createNamespace("ns", [USERS_TABLE]);
+    const result = getExtendedLineage(ast as Select, schema);
+
+    expect(result.fields).toEqual({
+      hashed_email: {
+        inputFields: [
+          {
+            namespace: "ns",
+            name: USERS_TABLE.name,
+            field: "email",
+            transformations: [{ type: "DIRECT", subtype: "TRANSFORMATION", masking: true }],
+          },
+        ],
+      },
+    });
+  });
+
+  test("SHA256 masking", () => {
+    const sql = `SELECT SHA256(ssn) as hashed_ssn FROM employees`;
+    const ast = parseSQL(sql);
+    const schema = createNamespace("ns", [createTable(`${DEFAULT_SCHEMA}.employees`, ["ssn"])]);
+    const result = getExtendedLineage(ast as Select, schema);
+
+    expect(result.fields).toEqual({
+      hashed_ssn: {
+        inputFields: [
+          {
+            namespace: "ns",
+            name: `${DEFAULT_SCHEMA}.employees`,
+            field: "ssn",
+            transformations: [{ type: "DIRECT", subtype: "TRANSFORMATION", masking: true }],
+          },
+        ],
+      },
+    });
+  });
+
+  test("MASK function", () => {
+    const sql = `SELECT MASK(phone) as masked_phone FROM contacts`;
+    const ast = parseSQL(sql);
+    const schema = createNamespace("ns", [createTable(`${DEFAULT_SCHEMA}.contacts`, ["phone"])]);
+    const result = getExtendedLineage(ast as Select, schema);
+
+    expect(result.fields).toEqual({
+      masked_phone: {
+        inputFields: [
+          {
+            namespace: "ns",
+            name: `${DEFAULT_SCHEMA}.contacts`,
+            field: "phone",
+            transformations: [{ type: "DIRECT", subtype: "TRANSFORMATION", masking: true }],
+          },
+        ],
+      },
+    });
+  });
+});
+
+describe("Field-Level Lineage: CASE Expressions", () => {
+  test("simple CASE WHEN", () => {
+    const sql = `
+      SELECT 
+        CASE WHEN status = 'active' THEN 'Active' ELSE 'Inactive' END as status_label
+      FROM users
+    `;
+    const ast = parseSQL(sql);
+    const schema = createNamespace("ns", [USERS_TABLE]);
+    const result = getExtendedLineage(ast as Select, schema);
+
+    // CASE WHEN condition column gets INDIRECT/CONDITION
+    expect(result.fields.status_label).toBeDefined();
+    expect(result.fields.status_label?.inputFields).toContainEqual({
+      namespace: "ns",
+      name: USERS_TABLE.name,
+      field: "status",
+      transformations: [INDIRECT_CONDITION],
+    });
+  });
+
+  test("CASE with column in result", () => {
+    const sql = `
+      SELECT 
+        CASE WHEN is_premium THEN discount_rate ELSE 0 END as applied_discount
+      FROM customers
+    `;
+    const ast = parseSQL(sql);
+    const schema = createNamespace("ns", [createTable(`${DEFAULT_SCHEMA}.customers`, ["is_premium", "discount_rate"])]);
+    const result = getExtendedLineage(ast as Select, schema);
+
+    const inputFieldNames = result.fields.applied_discount?.inputFields.map((f) => f.field);
+    expect(inputFieldNames).toContain("is_premium");
+    expect(inputFieldNames).toContain("discount_rate");
+  });
+
+  test("CASE with multiple conditions and results", () => {
+    const sql = `
+      SELECT 
+        CASE 
+          WHEN age < 18 THEN minor_price
+          WHEN age < 65 THEN adult_price
+          ELSE senior_price
+        END as ticket_price
+      FROM visitors
+    `;
+    const ast = parseSQL(sql);
+    const schema = createNamespace("ns", [
+      createTable(`${DEFAULT_SCHEMA}.visitors`, ["age", "minor_price", "adult_price", "senior_price"]),
+    ]);
+    const result = getExtendedLineage(ast as Select, schema);
+
+    const inputFieldNames = result.fields.ticket_price?.inputFields.map((f) => f.field);
+    expect(inputFieldNames).toContain("age");
+    expect(inputFieldNames).toContain("minor_price");
+    expect(inputFieldNames).toContain("adult_price");
+    expect(inputFieldNames).toContain("senior_price");
+  });
+});
+
+// =============================================================================
+// SECTION 2: DATASET-LEVEL LINEAGE - INDIRECT TRANSFORMATIONS
+// =============================================================================
+
+describe("Dataset-Level Lineage: INDIRECT/JOIN", () => {
   test("simple INNER JOIN", () => {
     const sql = `
-      SELECT u.id, u.name, o.total
+      SELECT u.id, o.total
       FROM users u
       JOIN orders o ON u.id = o.user_id
     `;
-
     const ast = parseSQL(sql);
-    const schema = createNamespace("trino", [
-      createTable("users", ["id", "name"]),
-      createTable("orders", ["id", "user_id", "total"]),
-    ]);
-
+    const schema = createNamespace("ns", [USERS_TABLE, createTable(`${DEFAULT_SCHEMA}.orders`, ["user_id", "total"])]);
     const result = getExtendedLineage(ast as Select, schema);
 
-    // Field-level lineage
-    expect(result.fields.id?.inputFields).toContainEqual({
-      namespace: "trino",
-      name: "users",
-      field: "id",
-      transformations: [DIRECT_IDENTITY],
-    });
-
-    // Dataset-level lineage - JOIN
-    const joinLineage = findBySubtype(result.dataset, "JOIN");
-    expect(joinLineage.length).toBe(2);
-    expect(joinLineage).toContainEqual({
-      namespace: "trino",
-      name: "users",
-      field: "id",
-      transformations: [INDIRECT_JOIN],
-    });
-    expect(joinLineage).toContainEqual({
-      namespace: "trino",
-      name: "orders",
-      field: "user_id",
-      transformations: [INDIRECT_JOIN],
-    });
+    expect(sortDataset(result.dataset)).toEqual(
+      sortDataset([
+        { namespace: "ns", name: USERS_TABLE.name, field: "id", transformations: [INDIRECT_JOIN] },
+        { namespace: "ns", name: `${DEFAULT_SCHEMA}.orders`, field: "user_id", transformations: [INDIRECT_JOIN] },
+      ]),
+    );
   });
 
   test("LEFT JOIN", () => {
@@ -156,17 +533,16 @@ describe("getExtendedLineage - JOIN only", () => {
       FROM users u
       LEFT JOIN orders o ON u.id = o.user_id
     `;
-
     const ast = parseSQL(sql);
-    const schema = createNamespace("trino", [
-      createTable("users", ["id", "name"]),
-      createTable("orders", ["id", "user_id", "total"]),
-    ]);
-
+    const schema = createNamespace("ns", [USERS_TABLE, createTable(`${DEFAULT_SCHEMA}.orders`, ["user_id", "total"])]);
     const result = getExtendedLineage(ast as Select, schema);
 
-    const joinLineage = findBySubtype(result.dataset, "JOIN");
-    expect(joinLineage.length).toBe(2);
+    expect(sortDataset(result.dataset)).toEqual(
+      sortDataset([
+        { namespace: "ns", name: USERS_TABLE.name, field: "id", transformations: [INDIRECT_JOIN] },
+        { namespace: "ns", name: `${DEFAULT_SCHEMA}.orders`, field: "user_id", transformations: [INDIRECT_JOIN] },
+      ]),
+    );
   });
 
   test("RIGHT JOIN", () => {
@@ -175,987 +551,402 @@ describe("getExtendedLineage - JOIN only", () => {
       FROM users u
       RIGHT JOIN orders o ON u.id = o.user_id
     `;
-
     const ast = parseSQL(sql);
-    const schema = createNamespace("trino", [
-      createTable("users", ["id", "name"]),
-      createTable("orders", ["id", "user_id", "total"]),
-    ]);
-
+    const schema = createNamespace("ns", [USERS_TABLE, createTable(`${DEFAULT_SCHEMA}.orders`, ["user_id", "total"])]);
     const result = getExtendedLineage(ast as Select, schema);
 
-    const joinLineage = findBySubtype(result.dataset, "JOIN");
-    expect(joinLineage.length).toBe(2);
+    expect(sortDataset(result.dataset)).toEqual(
+      sortDataset([
+        { namespace: "ns", name: USERS_TABLE.name, field: "id", transformations: [INDIRECT_JOIN] },
+        { namespace: "ns", name: `${DEFAULT_SCHEMA}.orders`, field: "user_id", transformations: [INDIRECT_JOIN] },
+      ]),
+    );
   });
 
   test("FULL OUTER JOIN", () => {
     const sql = `
-      SELECT u.id, u.name, o.total
+      SELECT u.id, o.total
       FROM users u
       FULL OUTER JOIN orders o ON u.id = o.user_id
     `;
-
     const ast = parseSQL(sql);
-    const schema = createNamespace("trino", [
-      createTable("users", ["id", "name"]),
-      createTable("orders", ["id", "user_id", "total"]),
-    ]);
-
+    const schema = createNamespace("ns", [USERS_TABLE, createTable(`${DEFAULT_SCHEMA}.orders`, ["user_id", "total"])]);
     const result = getExtendedLineage(ast as Select, schema);
 
-    // Field-level lineage
-    expect(result.fields.id?.inputFields).toContainEqual({
-      namespace: "trino",
-      name: "users",
-      field: "id",
-      transformations: [DIRECT_IDENTITY],
-    });
-    expect(result.fields.name?.inputFields).toContainEqual({
-      namespace: "trino",
-      name: "users",
-      field: "name",
-      transformations: [DIRECT_IDENTITY],
-    });
-    expect(result.fields.total?.inputFields).toContainEqual({
-      namespace: "trino",
-      name: "orders",
-      field: "total",
-      transformations: [DIRECT_IDENTITY],
-    });
-
-    // Dataset-level lineage - JOIN columns from both tables
-    const joinLineage = findBySubtype(result.dataset, "JOIN");
-    expect(joinLineage.length).toBe(2);
-    expect(joinLineage).toContainEqual({
-      namespace: "trino",
-      name: "users",
-      field: "id",
-      transformations: [INDIRECT_JOIN],
-    });
-    expect(joinLineage).toContainEqual({
-      namespace: "trino",
-      name: "orders",
-      field: "user_id",
-      transformations: [INDIRECT_JOIN],
-    });
+    expect(sortDataset(result.dataset)).toEqual(
+      sortDataset([
+        { namespace: "ns", name: USERS_TABLE.name, field: "id", transformations: [INDIRECT_JOIN] },
+        { namespace: "ns", name: `${DEFAULT_SCHEMA}.orders`, field: "user_id", transformations: [INDIRECT_JOIN] },
+      ]),
+    );
   });
 
-  test("FULL JOIN (shorthand)", () => {
+  test("JOIN with compound ON condition (AND)", () => {
     const sql = `
-      SELECT u.id, o.total
+      SELECT u.id
       FROM users u
-      FULL JOIN orders o ON u.id = o.user_id
+      JOIN orders o ON u.id = o.user_id AND u.region = o.region
     `;
-
     const ast = parseSQL(sql);
-    const schema = createNamespace("trino", [
-      createTable("users", ["id", "name"]),
-      createTable("orders", ["id", "user_id", "total"]),
-    ]);
-
+    const schema = createNamespace("ns", [USERS_TABLE, createTable(`${DEFAULT_SCHEMA}.orders`, ["user_id", "region"])]);
     const result = getExtendedLineage(ast as Select, schema);
 
-    const joinLineage = findBySubtype(result.dataset, "JOIN");
-    expect(joinLineage.length).toBe(2);
+    expect(sortDataset(result.dataset)).toEqual(
+      sortDataset([
+        { namespace: "ns", name: USERS_TABLE.name, field: "id", transformations: [INDIRECT_JOIN] },
+        { namespace: "ns", name: `${DEFAULT_SCHEMA}.orders`, field: "user_id", transformations: [INDIRECT_JOIN] },
+        { namespace: "ns", name: USERS_TABLE.name, field: "region", transformations: [INDIRECT_JOIN] },
+        { namespace: "ns", name: `${DEFAULT_SCHEMA}.orders`, field: "region", transformations: [INDIRECT_JOIN] },
+      ]),
+    );
   });
 
-  test("FULL OUTER JOIN with complex ON condition", () => {
+  test("multiple JOINs - three tables", () => {
     const sql = `
-      SELECT u.id, u.name, o.total
-      FROM users u
-      FULL OUTER JOIN orders o ON u.id = o.user_id AND u.region = o.region
-    `;
-
-    const ast = parseSQL(sql);
-    const schema = createNamespace("trino", [
-      createTable("users", ["id", "name", "region"]),
-      createTable("orders", ["id", "user_id", "region", "total"]),
-    ]);
-
-    const result = getExtendedLineage(ast as Select, schema);
-
-    const joinLineage = findBySubtype(result.dataset, "JOIN");
-    expect(joinLineage.length).toBe(4); // u.id, o.user_id, u.region, o.region
-    expect(joinLineage).toContainEqual({
-      namespace: "trino",
-      name: "users",
-      field: "id",
-      transformations: [INDIRECT_JOIN],
-    });
-    expect(joinLineage).toContainEqual({
-      namespace: "trino",
-      name: "orders",
-      field: "user_id",
-      transformations: [INDIRECT_JOIN],
-    });
-    expect(joinLineage).toContainEqual({
-      namespace: "trino",
-      name: "users",
-      field: "region",
-      transformations: [INDIRECT_JOIN],
-    });
-    expect(joinLineage).toContainEqual({
-      namespace: "trino",
-      name: "orders",
-      field: "region",
-      transformations: [INDIRECT_JOIN],
-    });
-  });
-
-  test("FULL OUTER JOIN with WHERE clause", () => {
-    const sql = `
-      SELECT u.id, u.name, o.total
-      FROM users u
-      FULL OUTER JOIN orders o ON u.id = o.user_id
-      WHERE u.status = 'active' OR o.status = 'completed'
-    `;
-
-    const ast = parseSQL(sql);
-    const schema = createNamespace("trino", [
-      createTable("users", ["id", "name", "status"]),
-      createTable("orders", ["id", "user_id", "status", "total"]),
-    ]);
-
-    const result = getExtendedLineage(ast as Select, schema);
-
-    // JOIN lineage
-    const joinLineage = findBySubtype(result.dataset, "JOIN");
-    expect(joinLineage.length).toBe(2);
-
-    // FILTER lineage from WHERE clause
-    const filterLineage = findBySubtype(result.dataset, "FILTER");
-    expect(filterLineage.length).toBe(2);
-    expect(filterLineage).toContainEqual({
-      namespace: "trino",
-      name: "users",
-      field: "status",
-      transformations: [INDIRECT_FILTER],
-    });
-    expect(filterLineage).toContainEqual({
-      namespace: "trino",
-      name: "orders",
-      field: "status",
-      transformations: [INDIRECT_FILTER],
-    });
-  });
-
-  test("CROSS JOIN", () => {
-    const sql = `
-      SELECT u.id, u.name, p.name as product_name
-      FROM users u
-      CROSS JOIN products p
-    `;
-
-    const ast = parseSQL(sql);
-    const schema = createNamespace("trino", [
-      createTable("users", ["id", "name"]),
-      createTable("products", ["id", "name"]),
-    ]);
-
-    const result = getExtendedLineage(ast as Select, schema);
-
-    // Field-level lineage should work correctly
-    expect(result.fields.id?.inputFields).toContainEqual({
-      namespace: "trino",
-      name: "users",
-      field: "id",
-      transformations: [DIRECT_IDENTITY],
-    });
-    expect(result.fields.name?.inputFields).toContainEqual({
-      namespace: "trino",
-      name: "users",
-      field: "name",
-      transformations: [DIRECT_IDENTITY],
-    });
-    expect(result.fields.product_name?.inputFields).toContainEqual({
-      namespace: "trino",
-      name: "products",
-      field: "name",
-      transformations: [DIRECT_IDENTITY],
-    });
-
-    // CROSS JOIN has no ON clause, so no JOIN lineage in dataset
-    const joinLineage = findBySubtype(result.dataset, "JOIN");
-    expect(joinLineage.length).toBe(0);
-  });
-
-  test("CROSS JOIN with WHERE clause", () => {
-    const sql = `
-      SELECT u.id, u.name, p.name as product_name
-      FROM users u
-      CROSS JOIN products p
-      WHERE u.status = 'active' AND p.category = 'electronics'
-    `;
-
-    const ast = parseSQL(sql);
-    const schema = createNamespace("trino", [
-      createTable("users", ["id", "name", "status"]),
-      createTable("products", ["id", "name", "category"]),
-    ]);
-
-    const result = getExtendedLineage(ast as Select, schema);
-
-    // CROSS JOIN has no ON clause, so no JOIN lineage
-    const joinLineage = findBySubtype(result.dataset, "JOIN");
-    expect(joinLineage.length).toBe(0);
-
-    // FILTER lineage from WHERE clause should be captured
-    const filterLineage = findBySubtype(result.dataset, "FILTER");
-    expect(filterLineage.length).toBe(2);
-    expect(filterLineage).toContainEqual({
-      namespace: "trino",
-      name: "users",
-      field: "status",
-      transformations: [INDIRECT_FILTER],
-    });
-    expect(filterLineage).toContainEqual({
-      namespace: "trino",
-      name: "products",
-      field: "category",
-      transformations: [INDIRECT_FILTER],
-    });
-  });
-
-  test("CROSS JOIN combined with regular JOIN", () => {
-    const sql = `
-      SELECT u.id, o.total, p.name as product_name
-      FROM users u
-      JOIN orders o ON u.id = o.user_id
-      CROSS JOIN products p
-    `;
-
-    const ast = parseSQL(sql);
-    const schema = createNamespace("trino", [
-      createTable("users", ["id", "name"]),
-      createTable("orders", ["id", "user_id", "total"]),
-      createTable("products", ["id", "name"]),
-    ]);
-
-    const result = getExtendedLineage(ast as Select, schema);
-
-    // Field-level lineage
-    expect(result.fields.id?.inputFields).toContainEqual({
-      namespace: "trino",
-      name: "users",
-      field: "id",
-      transformations: [DIRECT_IDENTITY],
-    });
-    expect(result.fields.total?.inputFields).toContainEqual({
-      namespace: "trino",
-      name: "orders",
-      field: "total",
-      transformations: [DIRECT_IDENTITY],
-    });
-    expect(result.fields.product_name?.inputFields).toContainEqual({
-      namespace: "trino",
-      name: "products",
-      field: "name",
-      transformations: [DIRECT_IDENTITY],
-    });
-
-    // JOIN lineage only from the regular JOIN (not CROSS JOIN)
-    const joinLineage = findBySubtype(result.dataset, "JOIN");
-    expect(joinLineage.length).toBe(2);
-    expect(joinLineage).toContainEqual({
-      namespace: "trino",
-      name: "users",
-      field: "id",
-      transformations: [INDIRECT_JOIN],
-    });
-    expect(joinLineage).toContainEqual({
-      namespace: "trino",
-      name: "orders",
-      field: "user_id",
-      transformations: [INDIRECT_JOIN],
-    });
-  });
-
-  test("implicit CROSS JOIN (comma syntax)", () => {
-    const sql = `
-      SELECT u.id, u.name, p.name as product_name
-      FROM users u, products p
-    `;
-
-    const ast = parseSQL(sql);
-    const schema = createNamespace("trino", [
-      createTable("users", ["id", "name"]),
-      createTable("products", ["id", "name"]),
-    ]);
-
-    const result = getExtendedLineage(ast as Select, schema);
-
-    // Field-level lineage should work correctly
-    expect(result.fields.id?.inputFields).toContainEqual({
-      namespace: "trino",
-      name: "users",
-      field: "id",
-      transformations: [DIRECT_IDENTITY],
-    });
-    expect(result.fields.product_name?.inputFields).toContainEqual({
-      namespace: "trino",
-      name: "products",
-      field: "name",
-      transformations: [DIRECT_IDENTITY],
-    });
-
-    // No JOIN lineage since implicit cross join has no ON clause
-    const joinLineage = findBySubtype(result.dataset, "JOIN");
-    expect(joinLineage.length).toBe(0);
-  });
-
-  test("implicit CROSS JOIN with WHERE acting as JOIN condition", () => {
-    const sql = `
-      SELECT u.id, o.total
-      FROM users u, orders o
-      WHERE u.id = o.user_id
-    `;
-
-    const ast = parseSQL(sql);
-    const schema = createNamespace("trino", [
-      createTable("users", ["id", "name"]),
-      createTable("orders", ["id", "user_id", "total"]),
-    ]);
-
-    const result = getExtendedLineage(ast as Select, schema);
-
-    // Field-level lineage
-    expect(result.fields.id?.inputFields).toContainEqual({
-      namespace: "trino",
-      name: "users",
-      field: "id",
-      transformations: [DIRECT_IDENTITY],
-    });
-    expect(result.fields.total?.inputFields).toContainEqual({
-      namespace: "trino",
-      name: "orders",
-      field: "total",
-      transformations: [DIRECT_IDENTITY],
-    });
-
-    // No JOIN lineage (CROSS JOIN has no ON clause)
-    const joinLineage = findBySubtype(result.dataset, "JOIN");
-    expect(joinLineage.length).toBe(0);
-
-    // The WHERE condition is captured as FILTER lineage
-    const filterLineage = findBySubtype(result.dataset, "FILTER");
-    expect(filterLineage.length).toBe(2);
-    expect(filterLineage).toContainEqual({
-      namespace: "trino",
-      name: "users",
-      field: "id",
-      transformations: [INDIRECT_FILTER],
-    });
-    expect(filterLineage).toContainEqual({
-      namespace: "trino",
-      name: "orders",
-      field: "user_id",
-      transformations: [INDIRECT_FILTER],
-    });
-  });
-
-  test("multiple JOINs", () => {
-    const sql = `
-      SELECT u.name, o.total, p.name as product_name
+      SELECT u.id, o.total, p.name
       FROM users u
       JOIN orders o ON u.id = o.user_id
       JOIN products p ON o.product_id = p.id
     `;
-
     const ast = parseSQL(sql);
-    const schema = createNamespace("trino", [
-      createTable("users", ["id", "name"]),
-      createTable("orders", ["id", "user_id", "product_id", "total"]),
-      createTable("products", ["id", "name"]),
+    const schema = createNamespace("ns", [
+      USERS_TABLE,
+      createTable(`${DEFAULT_SCHEMA}.orders`, ["user_id", "product_id", "total"]),
+      createTable(`${DEFAULT_SCHEMA}.products`, ["id", "name"]),
     ]);
-
     const result = getExtendedLineage(ast as Select, schema);
 
-    const joinLineage = findBySubtype(result.dataset, "JOIN");
-    expect(joinLineage.length).toBe(4); // u.id, o.user_id, o.product_id, p.id
+    expect(sortDataset(result.dataset)).toEqual(
+      sortDataset([
+        { namespace: "ns", name: USERS_TABLE.name, field: "id", transformations: [INDIRECT_JOIN] },
+        { namespace: "ns", name: `${DEFAULT_SCHEMA}.orders`, field: "user_id", transformations: [INDIRECT_JOIN] },
+        { namespace: "ns", name: `${DEFAULT_SCHEMA}.orders`, field: "product_id", transformations: [INDIRECT_JOIN] },
+        { namespace: "ns", name: `${DEFAULT_SCHEMA}.products`, field: "id", transformations: [INDIRECT_JOIN] },
+      ]),
+    );
   });
 
-  test("JOIN with complex ON condition", () => {
+  test("CROSS JOIN - no dataset lineage", () => {
     const sql = `
-      SELECT u.id, o.total
+      SELECT u.id, p.name
       FROM users u
-      JOIN orders o ON u.id = o.user_id AND u.status = o.status
+      CROSS JOIN products p
     `;
-
     const ast = parseSQL(sql);
-    const schema = createNamespace("trino", [
-      createTable("users", ["id", "status"]),
-      createTable("orders", ["id", "user_id", "status", "total"]),
-    ]);
-
+    const schema = createNamespace("ns", [USERS_TABLE, createTable(`${DEFAULT_SCHEMA}.products`, ["name"])]);
     const result = getExtendedLineage(ast as Select, schema);
 
-    const joinLineage = findBySubtype(result.dataset, "JOIN");
-    expect(joinLineage.length).toBe(4); // u.id, o.user_id, u.status, o.status
+    expect(result.dataset).toEqual([]);
   });
 
   test("self JOIN", () => {
     const sql = `
-      SELECT e.name as employee, m.name as manager
+      SELECT e.name, m.name as manager_name
       FROM employees e
       JOIN employees m ON e.manager_id = m.id
     `;
-
     const ast = parseSQL(sql);
-    const schema = createNamespace("trino", [createTable("employees", ["id", "name", "manager_id"])]);
-
+    const schema = createNamespace("ns", [createTable(`${DEFAULT_SCHEMA}.employees`, ["id", "name", "manager_id"])]);
     const result = getExtendedLineage(ast as Select, schema);
 
-    const joinLineage = findBySubtype(result.dataset, "JOIN");
-    expect(joinLineage.length).toBeGreaterThanOrEqual(2);
+    // Self join should have both columns from same table
+    expect(result.dataset?.length).toBeGreaterThanOrEqual(2);
   });
 });
 
-describe("getExtendedLineage - WHERE only (FILTER)", () => {
-  test("simple WHERE clause", () => {
-    const sql = `
-      SELECT id, name
-      FROM users
-      WHERE status = 'active'
-    `;
-
+describe("Dataset-Level Lineage: INDIRECT/FILTER (WHERE)", () => {
+  test("simple WHERE equality", () => {
+    const sql = `SELECT id FROM users WHERE status = 'active'`;
     const ast = parseSQL(sql);
-    const schema = createNamespace("trino", [createTable("users", ["id", "name", "status"])]);
-
+    const schema = createNamespace("ns", [USERS_TABLE]);
     const result = getExtendedLineage(ast as Select, schema);
 
-    const filterLineage = findBySubtype(result.dataset, "FILTER");
-    expect(filterLineage.length).toBe(1);
-    expect(filterLineage).toContainEqual({
-      namespace: "trino",
-      name: "users",
-      field: "status",
-      transformations: [INDIRECT_FILTER],
-    });
+    expect(result.dataset).toEqual([
+      { namespace: "ns", name: USERS_TABLE.name, field: "status", transformations: [INDIRECT_FILTER] },
+    ]);
   });
 
   test("WHERE with AND", () => {
-    const sql = `
-      SELECT id, name
-      FROM users
-      WHERE status = 'active' AND age > 18
-    `;
-
+    const sql = `SELECT id FROM users WHERE status = 'active' AND age > 18`;
     const ast = parseSQL(sql);
-    const schema = createNamespace("trino", [createTable("users", ["id", "name", "status", "age"])]);
-
+    const schema = createNamespace("ns", [USERS_TABLE]);
     const result = getExtendedLineage(ast as Select, schema);
 
-    const filterLineage = findBySubtype(result.dataset, "FILTER");
-    expect(filterLineage.length).toBe(2);
-    expect(filterLineage).toContainEqual({
-      namespace: "trino",
-      name: "users",
-      field: "status",
-      transformations: [INDIRECT_FILTER],
-    });
-    expect(filterLineage).toContainEqual({
-      namespace: "trino",
-      name: "users",
-      field: "age",
-      transformations: [INDIRECT_FILTER],
-    });
+    expect(sortDataset(result.dataset)).toEqual(
+      sortDataset([
+        { namespace: "ns", name: USERS_TABLE.name, field: "status", transformations: [INDIRECT_FILTER] },
+        { namespace: "ns", name: USERS_TABLE.name, field: "age", transformations: [INDIRECT_FILTER] },
+      ]),
+    );
   });
 
   test("WHERE with OR", () => {
-    const sql = `
-      SELECT id, name
-      FROM users
-      WHERE status = 'active' OR country = 'US'
-    `;
-
+    const sql = `SELECT id FROM users WHERE status = 'active' OR status = 'pending'`;
     const ast = parseSQL(sql);
-    const schema = createNamespace("trino", [createTable("users", ["id", "name", "status", "country"])]);
-
+    const schema = createNamespace("ns", [USERS_TABLE]);
     const result = getExtendedLineage(ast as Select, schema);
 
-    const filterLineage = findBySubtype(result.dataset, "FILTER");
-    expect(filterLineage.length).toBe(2);
-  });
-
-  test("WHERE with complex nested conditions", () => {
-    const sql = `
-      SELECT id, name
-      FROM users
-      WHERE (status = 'active' AND age > 18) OR (country = 'US' AND verified = true)
-    `;
-
-    const ast = parseSQL(sql);
-    const schema = createNamespace("trino", [
-      createTable("users", ["id", "name", "status", "age", "country", "verified"]),
+    // Same column referenced twice, should be deduplicated
+    expect(result.dataset).toEqual([
+      { namespace: "ns", name: USERS_TABLE.name, field: "status", transformations: [INDIRECT_FILTER] },
     ]);
-
-    const result = getExtendedLineage(ast as Select, schema);
-
-    const filterLineage = findBySubtype(result.dataset, "FILTER");
-    expect(filterLineage.length).toBe(4);
   });
 
   test("WHERE with IN clause", () => {
-    const sql = `
-      SELECT id, name
-      FROM users
-      WHERE country IN ('US', 'UK', 'CA')
-    `;
-
+    const sql = `SELECT id FROM users WHERE country IN ('US', 'UK', 'CA')`;
     const ast = parseSQL(sql);
-    const schema = createNamespace("trino", [createTable("users", ["id", "name", "country"])]);
-
+    const schema = createNamespace("ns", [USERS_TABLE]);
     const result = getExtendedLineage(ast as Select, schema);
 
-    const filterLineage = findBySubtype(result.dataset, "FILTER");
-    expect(filterLineage.length).toBe(1);
-    expect(filterLineage).toContainEqual({
-      namespace: "trino",
-      name: "users",
-      field: "country",
-      transformations: [INDIRECT_FILTER],
-    });
+    expect(result.dataset).toEqual([
+      { namespace: "ns", name: USERS_TABLE.name, field: "country", transformations: [INDIRECT_FILTER] },
+    ]);
   });
 
   test("WHERE with BETWEEN", () => {
-    const sql = `
-      SELECT id, name
-      FROM users
-      WHERE age BETWEEN 18 AND 65
-    `;
-
+    const sql = `SELECT id FROM users WHERE age BETWEEN 18 AND 65`;
     const ast = parseSQL(sql);
-    const schema = createNamespace("trino", [createTable("users", ["id", "name", "age"])]);
-
+    const schema = createNamespace("ns", [USERS_TABLE]);
     const result = getExtendedLineage(ast as Select, schema);
 
-    const filterLineage = findBySubtype(result.dataset, "FILTER");
-    expect(filterLineage.length).toBe(1);
+    expect(result.dataset).toEqual([
+      { namespace: "ns", name: USERS_TABLE.name, field: "age", transformations: [INDIRECT_FILTER] },
+    ]);
   });
 
   test("WHERE with LIKE", () => {
-    const sql = `
-      SELECT id, name
-      FROM users
-      WHERE name LIKE 'John%'
-    `;
-
+    const sql = `SELECT id FROM users WHERE name LIKE 'John%'`;
     const ast = parseSQL(sql);
-    const schema = createNamespace("trino", [createTable("users", ["id", "name"])]);
-
+    const schema = createNamespace("ns", [USERS_TABLE]);
     const result = getExtendedLineage(ast as Select, schema);
 
-    const filterLineage = findBySubtype(result.dataset, "FILTER");
-    expect(filterLineage.length).toBe(1);
+    expect(result.dataset).toEqual([
+      { namespace: "ns", name: USERS_TABLE.name, field: "name", transformations: [INDIRECT_FILTER] },
+    ]);
   });
 
   test("WHERE with IS NULL", () => {
-    const sql = `
-      SELECT id, name
-      FROM users
-      WHERE email IS NULL
-    `;
-
+    const sql = `SELECT id FROM users WHERE email IS NULL`;
     const ast = parseSQL(sql);
-    const schema = createNamespace("trino", [createTable("users", ["id", "name", "email"])]);
-
+    const schema = createNamespace("ns", [USERS_TABLE]);
     const result = getExtendedLineage(ast as Select, schema);
 
-    const filterLineage = findBySubtype(result.dataset, "FILTER");
-    expect(filterLineage.length).toBe(1);
-  });
-});
-
-describe("getExtendedLineage - GROUP BY only", () => {
-  test("simple GROUP BY", () => {
-    const sql = `
-      SELECT country, COUNT(*) as count
-      FROM users
-      GROUP BY country
-    `;
-
-    const ast = parseSQL(sql);
-    const schema = createNamespace("trino", [createTable("users", ["id", "name", "country"])]);
-
-    const result = getExtendedLineage(ast as Select, schema);
-
-    const groupByLineage = findBySubtype(result.dataset, "GROUP_BY");
-    expect(groupByLineage.length).toBe(1);
-    expect(groupByLineage).toContainEqual({
-      namespace: "trino",
-      name: "users",
-      field: "country",
-      transformations: [INDIRECT_GROUP_BY],
-    });
-  });
-
-  test("multiple GROUP BY columns", () => {
-    const sql = `
-      SELECT country, city, COUNT(*) as count
-      FROM users
-      GROUP BY country, city
-    `;
-
-    const ast = parseSQL(sql);
-    const schema = createNamespace("trino", [createTable("users", ["id", "name", "country", "city"])]);
-
-    const result = getExtendedLineage(ast as Select, schema);
-
-    const groupByLineage = findBySubtype(result.dataset, "GROUP_BY");
-    expect(groupByLineage.length).toBe(2);
-    expect(groupByLineage).toContainEqual({
-      namespace: "trino",
-      name: "users",
-      field: "country",
-      transformations: [INDIRECT_GROUP_BY],
-    });
-    expect(groupByLineage).toContainEqual({
-      namespace: "trino",
-      name: "users",
-      field: "city",
-      transformations: [INDIRECT_GROUP_BY],
-    });
-  });
-
-  test("GROUP BY with aggregation functions", () => {
-    const sql = `
-      SELECT 
-        department,
-        SUM(salary) as total_salary,
-        AVG(age) as avg_age,
-        MIN(hire_date) as first_hire
-      FROM employees
-      GROUP BY department
-    `;
-
-    const ast = parseSQL(sql);
-    const schema = createNamespace("trino", [
-      createTable("employees", ["id", "department", "salary", "age", "hire_date"]),
+    expect(result.dataset).toEqual([
+      { namespace: "ns", name: USERS_TABLE.name, field: "email", transformations: [INDIRECT_FILTER] },
     ]);
+  });
 
+  test("WHERE with IS NOT NULL", () => {
+    const sql = `SELECT id FROM users WHERE email IS NOT NULL`;
+    const ast = parseSQL(sql);
+    const schema = createNamespace("ns", [USERS_TABLE]);
     const result = getExtendedLineage(ast as Select, schema);
 
-    // Field-level lineage should show aggregations
-    expect(result.fields.total_salary?.inputFields).toContainEqual({
-      namespace: "trino",
-      name: "employees",
-      field: "salary",
-      transformations: [DIRECT_AGGREGATION],
-    });
+    expect(result.dataset).toEqual([
+      { namespace: "ns", name: USERS_TABLE.name, field: "email", transformations: [INDIRECT_FILTER] },
+    ]);
+  });
 
-    // Dataset-level lineage should show GROUP_BY
-    const groupByLineage = findBySubtype(result.dataset, "GROUP_BY");
-    expect(groupByLineage.length).toBe(1);
-    expect(groupByLineage).toContainEqual({
-      namespace: "trino",
-      name: "employees",
-      field: "department",
-      transformations: [INDIRECT_GROUP_BY],
-    });
+  test("WHERE with nested complex conditions", () => {
+    const sql = `SELECT id FROM users WHERE (status = 'active' AND age > 18) OR (country = 'US' AND verified = true)`;
+    const ast = parseSQL(sql);
+    const schema = createNamespace("ns", [USERS_TABLE]);
+    const result = getExtendedLineage(ast as Select, schema);
+
+    expect(sortDataset(result.dataset)).toEqual(
+      sortDataset([
+        { namespace: "ns", name: USERS_TABLE.name, field: "status", transformations: [INDIRECT_FILTER] },
+        { namespace: "ns", name: USERS_TABLE.name, field: "age", transformations: [INDIRECT_FILTER] },
+        { namespace: "ns", name: USERS_TABLE.name, field: "country", transformations: [INDIRECT_FILTER] },
+        { namespace: "ns", name: USERS_TABLE.name, field: "verified", transformations: [INDIRECT_FILTER] },
+      ]),
+    );
   });
 });
 
-describe("getExtendedLineage - ORDER BY only (SORT)", () => {
-  test("simple ORDER BY", () => {
-    const sql = `
-      SELECT id, name
-      FROM users
-      ORDER BY created_at DESC
-    `;
-
+describe("Dataset-Level Lineage: INDIRECT/GROUP_BY", () => {
+  test("simple GROUP BY single column", () => {
+    const sql = `SELECT country, COUNT(*) FROM users GROUP BY country`;
     const ast = parseSQL(sql);
-    const schema = createNamespace("trino", [createTable("users", ["id", "name", "created_at"])]);
-
+    const schema = createNamespace("ns", [USERS_TABLE]);
     const result = getExtendedLineage(ast as Select, schema);
 
-    const sortLineage = findBySubtype(result.dataset, "SORT");
-    expect(sortLineage.length).toBe(1);
-    expect(sortLineage).toContainEqual({
-      namespace: "trino",
-      name: "users",
-      field: "created_at",
-      transformations: [INDIRECT_SORT],
-    });
+    expect(result.dataset).toEqual([
+      { namespace: "ns", name: USERS_TABLE.name, field: "country", transformations: [INDIRECT_GROUP_BY] },
+    ]);
   });
 
-  test("multiple ORDER BY columns", () => {
-    const sql = `
-      SELECT id, name
-      FROM users
-      ORDER BY country ASC, name DESC
-    `;
-
+  test("GROUP BY multiple columns", () => {
+    const sql = `SELECT country, city, COUNT(*) FROM users GROUP BY country, city`;
     const ast = parseSQL(sql);
-    const schema = createNamespace("trino", [createTable("users", ["id", "name", "country"])]);
-
+    const schema = createNamespace("ns", [USERS_TABLE]);
     const result = getExtendedLineage(ast as Select, schema);
 
-    const sortLineage = findBySubtype(result.dataset, "SORT");
-    expect(sortLineage.length).toBe(2);
-    expect(sortLineage).toContainEqual({
-      namespace: "trino",
-      name: "users",
-      field: "country",
-      transformations: [INDIRECT_SORT],
-    });
-    expect(sortLineage).toContainEqual({
-      namespace: "trino",
-      name: "users",
-      field: "name",
-      transformations: [INDIRECT_SORT],
-    });
+    expect(sortDataset(result.dataset)).toEqual(
+      sortDataset([
+        { namespace: "ns", name: USERS_TABLE.name, field: "country", transformations: [INDIRECT_GROUP_BY] },
+        { namespace: "ns", name: USERS_TABLE.name, field: "city", transformations: [INDIRECT_GROUP_BY] },
+      ]),
+    );
   });
 
-  test("ORDER BY with NULLS FIRST/LAST", () => {
-    const sql = `
-      SELECT id, name
-      FROM users
-      ORDER BY email NULLS LAST
-    `;
-
+  test("GROUP BY with expression", () => {
+    const sql = `SELECT DATE_TRUNC('month', created_at) as month, COUNT(*) FROM events GROUP BY DATE_TRUNC('month', created_at)`;
     const ast = parseSQL(sql);
-    const schema = createNamespace("trino", [createTable("users", ["id", "name", "email"])]);
-
+    const schema = createNamespace("ns", [createTable(`${DEFAULT_SCHEMA}.events`, ["id", "created_at"])]);
     const result = getExtendedLineage(ast as Select, schema);
 
-    const sortLineage = findBySubtype(result.dataset, "SORT");
-    expect(sortLineage.length).toBe(1);
-  });
-
-  test("ORDER BY alias resolves to base column", () => {
-    const sql = `
-      SELECT country, SUM(revenue) as total_revenue
-      FROM orders
-      GROUP BY country
-      ORDER BY total_revenue DESC
-    `;
-
-    const ast = parseSQL(sql);
-    const schema = createNamespace("trino", [createTable("orders", ["id", "country", "revenue"])]);
-
-    const result = getExtendedLineage(ast as Select, schema);
-
-    // ORDER BY total_revenue should resolve to the base column 'revenue' used in SUM(revenue)
-    const sortLineage = findBySubtype(result.dataset, "SORT");
-    expect(sortLineage.length).toBe(1);
-    expect(sortLineage).toContainEqual({
-      namespace: "trino",
-      name: "orders",
-      field: "revenue",
-      transformations: [INDIRECT_SORT],
-    });
-  });
-
-  test("ORDER BY alias with multiple columns in expression", () => {
-    const sql = `
-      SELECT product_id, (quantity * price) as total_value
-      FROM order_items
-      ORDER BY total_value DESC
-    `;
-
-    const ast = parseSQL(sql);
-    const schema = createNamespace("trino", [createTable("order_items", ["id", "product_id", "quantity", "price"])]);
-
-    const result = getExtendedLineage(ast as Select, schema);
-
-    // ORDER BY total_value should resolve to both 'quantity' and 'price' columns
-    const sortLineage = findBySubtype(result.dataset, "SORT");
-    expect(sortLineage.length).toBe(2);
-    expect(sortLineage).toContainEqual({
-      namespace: "trino",
-      name: "order_items",
-      field: "quantity",
-      transformations: [INDIRECT_SORT],
-    });
-    expect(sortLineage).toContainEqual({
-      namespace: "trino",
-      name: "order_items",
-      field: "price",
-      transformations: [INDIRECT_SORT],
-    });
-  });
-
-  test("ORDER BY with mix of alias and direct column references", () => {
-    const sql = `
-      SELECT country, SUM(revenue) as total_revenue
-      FROM orders
-      GROUP BY country
-      ORDER BY country ASC, total_revenue DESC
-    `;
-
-    const ast = parseSQL(sql);
-    const schema = createNamespace("trino", [createTable("orders", ["id", "country", "revenue"])]);
-
-    const result = getExtendedLineage(ast as Select, schema);
-
-    const sortLineage = findBySubtype(result.dataset, "SORT");
-    expect(sortLineage.length).toBe(2);
-    expect(sortLineage).toContainEqual({
-      namespace: "trino",
-      name: "orders",
-      field: "country",
-      transformations: [INDIRECT_SORT],
-    });
-    expect(sortLineage).toContainEqual({
-      namespace: "trino",
-      name: "orders",
-      field: "revenue",
-      transformations: [INDIRECT_SORT],
-    });
+    expect(result.dataset).toEqual([
+      { namespace: "ns", name: `${DEFAULT_SCHEMA}.events`, field: "created_at", transformations: [INDIRECT_GROUP_BY] },
+    ]);
   });
 });
 
-describe("getExtendedLineage - HAVING only", () => {
-  test("simple HAVING clause", () => {
-    const sql = `
-      SELECT country, COUNT(*) as count
-      FROM users
-      GROUP BY country
-      HAVING COUNT(*) > 10
-    `;
-
+describe("Dataset-Level Lineage: INDIRECT/SORT (ORDER BY)", () => {
+  test("simple ORDER BY single column", () => {
+    const sql = `SELECT id, name FROM users ORDER BY created_at`;
     const ast = parseSQL(sql);
-    const schema = createNamespace("trino", [createTable("users", ["id", "name", "country"])]);
-
+    const schema = createNamespace("ns", [USERS_TABLE]);
     const result = getExtendedLineage(ast as Select, schema);
 
-    // GROUP BY lineage
-    const groupByLineage = findBySubtype(result.dataset, "GROUP_BY");
-    expect(groupByLineage.length).toBe(1);
-
-    // Note: COUNT(*) doesn't reference a specific column, so HAVING may not add to dataset
+    expect(result.dataset).toEqual([
+      { namespace: "ns", name: USERS_TABLE.name, field: "created_at", transformations: [INDIRECT_SORT] },
+    ]);
   });
 
-  test("HAVING with column reference", () => {
+  test("ORDER BY multiple columns", () => {
+    const sql = `SELECT id, name FROM users ORDER BY country ASC, name DESC`;
+    const ast = parseSQL(sql);
+    const schema = createNamespace("ns", [USERS_TABLE]);
+    const result = getExtendedLineage(ast as Select, schema);
+
+    expect(sortDataset(result.dataset)).toEqual(
+      sortDataset([
+        { namespace: "ns", name: USERS_TABLE.name, field: "country", transformations: [INDIRECT_SORT] },
+        { namespace: "ns", name: USERS_TABLE.name, field: "name", transformations: [INDIRECT_SORT] },
+      ]),
+    );
+  });
+
+  test("ORDER BY alias resolves to base columns", () => {
+    const sql = `SELECT quantity * price as total FROM order_items ORDER BY total`;
+    const ast = parseSQL(sql);
+    const schema = createNamespace("ns", [createTable(`${DEFAULT_SCHEMA}.order_items`, ["quantity", "price"])]);
+    const result = getExtendedLineage(ast as Select, schema);
+
+    expect(sortDataset(result.dataset)).toEqual(
+      sortDataset([
+        { namespace: "ns", name: `${DEFAULT_SCHEMA}.order_items`, field: "price", transformations: [INDIRECT_SORT] },
+        { namespace: "ns", name: `${DEFAULT_SCHEMA}.order_items`, field: "quantity", transformations: [INDIRECT_SORT] },
+      ]),
+    );
+  });
+
+  test("ORDER BY with NULLS LAST", () => {
+    const sql = `SELECT id, name FROM users ORDER BY email NULLS LAST`;
+    const ast = parseSQL(sql);
+    const schema = createNamespace("ns", [USERS_TABLE]);
+    const result = getExtendedLineage(ast as Select, schema);
+
+    expect(result.dataset).toEqual([
+      { namespace: "ns", name: USERS_TABLE.name, field: "email", transformations: [INDIRECT_SORT] },
+    ]);
+  });
+});
+
+describe("Dataset-Level Lineage: INDIRECT/FILTER (HAVING)", () => {
+  test("HAVING with aggregation column reference", () => {
     const sql = `
-      SELECT department, SUM(salary) as total_salary
+      SELECT department, SUM(salary) as total
       FROM employees
       GROUP BY department
       HAVING SUM(salary) > 100000
     `;
-
     const ast = parseSQL(sql);
-    const schema = createNamespace("trino", [createTable("employees", ["id", "department", "salary"])]);
-
+    const schema = createNamespace("ns", [createTable(`${DEFAULT_SCHEMA}.employees`, ["department", "salary"])]);
     const result = getExtendedLineage(ast as Select, schema);
 
-    // Should have GROUP_BY
-    const groupByLineage = findBySubtype(result.dataset, "GROUP_BY");
-    expect(groupByLineage.length).toBe(1);
-
-    // HAVING filters should show as FILTER
-    const filterLineage = findBySubtype(result.dataset, "FILTER");
-    expect(filterLineage).toContainEqual({
-      namespace: "trino",
-      name: "employees",
-      field: "salary",
-      transformations: [INDIRECT_FILTER],
-    });
+    expect(sortDataset(result.dataset)).toEqual(
+      sortDataset([
+        { namespace: "ns", name: `${DEFAULT_SCHEMA}.employees`, field: "department", transformations: [INDIRECT_GROUP_BY] },
+        { namespace: "ns", name: `${DEFAULT_SCHEMA}.employees`, field: "salary", transformations: [INDIRECT_FILTER] },
+      ]),
+    );
   });
 
   test("HAVING with multiple conditions", () => {
     const sql = `
-      SELECT department, AVG(age) as avg_age
+      SELECT department, AVG(age), COUNT(id)
       FROM employees
       GROUP BY department
       HAVING AVG(age) > 30 AND COUNT(id) > 5
     `;
-
     const ast = parseSQL(sql);
-    const schema = createNamespace("trino", [createTable("employees", ["id", "department", "age"])]);
-
+    const schema = createNamespace("ns", [createTable(`${DEFAULT_SCHEMA}.employees`, ["id", "department", "age"])]);
     const result = getExtendedLineage(ast as Select, schema);
 
-    const filterLineage = findBySubtype(result.dataset, "FILTER");
-    expect(filterLineage.length).toBeGreaterThanOrEqual(1);
+    const filterLineage = result.dataset?.filter((d) => d.transformations?.[0]?.subtype === "FILTER");
+    expect(filterLineage).toContainEqual({
+      namespace: "ns",
+      name: `${DEFAULT_SCHEMA}.employees`,
+      field: "age",
+      transformations: [INDIRECT_FILTER],
+    });
+    expect(filterLineage).toContainEqual({
+      namespace: "ns",
+      name: `${DEFAULT_SCHEMA}.employees`,
+      field: "id",
+      transformations: [INDIRECT_FILTER],
+    });
   });
 });
 
-describe("getExtendedLineage - WINDOW functions", () => {
-  test("window function with PARTITION BY and ORDER BY - full lineage captured", () => {
+describe("Dataset-Level Lineage: INDIRECT/WINDOW", () => {
+  test("window function with PARTITION BY only", () => {
     const sql = `
-      SELECT 
-        id,
-        department,
-        SUM(salary) OVER (PARTITION BY department ORDER BY salary DESC) as running_total
-      FROM employees
+      SELECT id, SUM(amount) OVER (PARTITION BY category) as category_total
+      FROM transactions
     `;
-
     const ast = parseSQL(sql);
-    const schema = createNamespace("trino", [createTable("employees", ["id", "department", "salary"])]);
-
+    const schema = createNamespace("ns", [createTable(`${DEFAULT_SCHEMA}.transactions`, ["id", "amount", "category"])]);
     const result = getExtendedLineage(ast as Select, schema);
 
-    // Field-level lineage is captured correctly
-    expect(result.fields.id?.inputFields).toContainEqual({
-      namespace: "trino",
-      name: "employees",
-      field: "id",
-      transformations: [DIRECT_IDENTITY],
-    });
-    expect(result.fields.department?.inputFields).toContainEqual({
-      namespace: "trino",
-      name: "employees",
-      field: "department",
-      transformations: [DIRECT_IDENTITY],
-    });
-    // The aggregated column in window function is captured
-    expect(result.fields.running_total?.inputFields).toContainEqual({
-      namespace: "trino",
-      name: "employees",
-      field: "salary",
-      transformations: [DIRECT_AGGREGATION],
-    });
-
-    // Dataset-level WINDOW lineage from PARTITION BY and ORDER BY
-    const windowLineage = findBySubtype(result.dataset, "WINDOW");
-    expect(windowLineage.length).toBe(2);
-    expect(windowLineage).toContainEqual({
-      namespace: "trino",
-      name: "employees",
-      field: "department",
-      transformations: [INDIRECT_WINDOW],
-    });
-    expect(windowLineage).toContainEqual({
-      namespace: "trino",
-      name: "employees",
-      field: "salary",
-      transformations: [INDIRECT_WINDOW],
-    });
+    expect(result.dataset).toEqual([
+      { namespace: "ns", name: `${DEFAULT_SCHEMA}.transactions`, field: "category", transformations: [INDIRECT_WINDOW] },
+    ]);
   });
 
-  test("window function with filter - combined lineage", () => {
+  test("window function with ORDER BY only", () => {
     const sql = `
-      SELECT 
-        id,
-        SUM(amount) OVER (ORDER BY date) as running_total
-      FROM transactions
-      WHERE status = 'completed'
+      SELECT id, ROW_NUMBER() OVER (ORDER BY created_at) as row_num
+      FROM events
     `;
-
     const ast = parseSQL(sql);
-    const schema = createNamespace("trino", [createTable("transactions", ["id", "amount", "date", "status"])]);
-
+    const schema = createNamespace("ns", [createTable(`${DEFAULT_SCHEMA}.events`, ["id", "created_at"])]);
     const result = getExtendedLineage(ast as Select, schema);
 
-    // WINDOW lineage from ORDER BY in OVER clause
-    const windowLineage = findBySubtype(result.dataset, "WINDOW");
-    expect(windowLineage.length).toBe(1);
-    expect(windowLineage).toContainEqual({
-      namespace: "trino",
-      name: "transactions",
-      field: "date",
-      transformations: [INDIRECT_WINDOW],
-    });
+    expect(result.dataset).toEqual([
+      { namespace: "ns", name: `${DEFAULT_SCHEMA}.events`, field: "created_at", transformations: [INDIRECT_WINDOW] },
+    ]);
+  });
 
-    // FILTER lineage from WHERE is captured
-    const filterLineage = findBySubtype(result.dataset, "FILTER");
-    expect(filterLineage).toContainEqual({
-      namespace: "trino",
-      name: "transactions",
-      field: "status",
-      transformations: [INDIRECT_FILTER],
-    });
+  test("window function with PARTITION BY and ORDER BY", () => {
+    const sql = `
+      SELECT id, SUM(amount) OVER (PARTITION BY user_id ORDER BY created_at) as running_total
+      FROM transactions
+    `;
+    const ast = parseSQL(sql);
+    const schema = createNamespace("ns", [
+      createTable(`${DEFAULT_SCHEMA}.transactions`, ["id", "amount", "user_id", "created_at"]),
+    ]);
+    const result = getExtendedLineage(ast as Select, schema);
+
+    expect(sortDataset(result.dataset)).toEqual(
+      sortDataset([
+        { namespace: "ns", name: `${DEFAULT_SCHEMA}.transactions`, field: "user_id", transformations: [INDIRECT_WINDOW] },
+        { namespace: "ns", name: `${DEFAULT_SCHEMA}.transactions`, field: "created_at", transformations: [INDIRECT_WINDOW] },
+      ]),
+    );
   });
 
   test("multiple window functions", () => {
@@ -1166,1486 +957,414 @@ describe("getExtendedLineage - WINDOW functions", () => {
         SUM(amount) OVER (PARTITION BY user_id ORDER BY created_at) as running_total
       FROM orders
     `;
-
     const ast = parseSQL(sql);
-    const schema = createNamespace("trino", [createTable("orders", ["id", "category", "created_at", "amount", "user_id"])]);
-
+    const schema = createNamespace("ns", [
+      createTable(`${DEFAULT_SCHEMA}.orders`, ["id", "category", "created_at", "amount", "user_id"]),
+    ]);
     const result = getExtendedLineage(ast as Select, schema);
 
-    const windowLineage = findBySubtype(result.dataset, "WINDOW");
-    // category, created_at (from first window), user_id, created_at (from second window)
-    // created_at should be deduplicated
-    expect(windowLineage.length).toBe(3);
-    expect(windowLineage).toContainEqual({
-      namespace: "trino",
-      name: "orders",
-      field: "category",
-      transformations: [INDIRECT_WINDOW],
-    });
-    expect(windowLineage).toContainEqual({
-      namespace: "trino",
-      name: "orders",
-      field: "user_id",
-      transformations: [INDIRECT_WINDOW],
-    });
-    expect(windowLineage).toContainEqual({
-      namespace: "trino",
-      name: "orders",
-      field: "created_at",
-      transformations: [INDIRECT_WINDOW],
-    });
-  });
-});
-
-describe("getExtendedLineage - CASE expressions (CONDITION)", () => {
-  test("simple CASE WHEN", () => {
-    const sql = `
-      SELECT 
-        id,
-        CASE 
-          WHEN status = 'active' THEN 'Active'
-          ELSE 'Inactive'
-        END as status_label
-      FROM users
-    `;
-
-    const ast = parseSQL(sql);
-    const schema = createNamespace("trino", [createTable("users", ["id", "status"])]);
-
-    const result = getExtendedLineage(ast as Select, schema);
-
-    // Field-level lineage should contain the status column with CONDITION
-    expect(result.fields.status_label).toBeDefined();
-    const hasConditionOrTransformation = result.fields.status_label?.inputFields.some(
-      (f) =>
-        f.transformations?.some((t) => t.subtype === "CONDITION") ||
-        f.transformations?.some((t) => t.subtype === "TRANSFORMATION"),
+    expect(sortDataset(result.dataset)).toEqual(
+      sortDataset([
+        { namespace: "ns", name: `${DEFAULT_SCHEMA}.orders`, field: "category", transformations: [INDIRECT_WINDOW] },
+        { namespace: "ns", name: `${DEFAULT_SCHEMA}.orders`, field: "created_at", transformations: [INDIRECT_WINDOW] },
+        { namespace: "ns", name: `${DEFAULT_SCHEMA}.orders`, field: "user_id", transformations: [INDIRECT_WINDOW] },
+      ]),
     );
-    expect(hasConditionOrTransformation).toBe(true);
   });
 
-  test("CASE with multiple conditions", () => {
+  test("RANK window function", () => {
     const sql = `
-      SELECT 
-        id,
-        CASE 
-          WHEN age < 18 THEN 'Minor'
-          WHEN age < 65 THEN 'Adult'
-          ELSE 'Senior'
-        END as age_group
-      FROM users
+      SELECT id, RANK() OVER (PARTITION BY department ORDER BY salary DESC) as salary_rank
+      FROM employees
     `;
-
     const ast = parseSQL(sql);
-    const schema = createNamespace("trino", [createTable("users", ["id", "age"])]);
-
+    const schema = createNamespace("ns", [createTable(`${DEFAULT_SCHEMA}.employees`, ["id", "department", "salary"])]);
     const result = getExtendedLineage(ast as Select, schema);
 
-    expect(result.fields.age_group).toBeDefined();
-    expect(result.fields.age_group?.inputFields.length).toBeGreaterThan(0);
-  });
-
-  test("CASE with column in result", () => {
-    const sql = `
-      SELECT 
-        id,
-        CASE 
-          WHEN discount_type = 'percent' THEN price * (1 - discount_value / 100)
-          ELSE price - discount_value
-        END as final_price
-      FROM products
-    `;
-
-    const ast = parseSQL(sql);
-    const schema = createNamespace("trino", [createTable("products", ["id", "price", "discount_type", "discount_value"])]);
-
-    const result = getExtendedLineage(ast as Select, schema);
-
-    const inputFields = result.fields.final_price?.inputFields.map((f) => f.field);
-    expect(inputFields).toContain("price");
-    expect(inputFields).toContain("discount_type");
-    expect(inputFields).toContain("discount_value");
+    expect(sortDataset(result.dataset)).toEqual(
+      sortDataset([
+        { namespace: "ns", name: `${DEFAULT_SCHEMA}.employees`, field: "department", transformations: [INDIRECT_WINDOW] },
+        { namespace: "ns", name: `${DEFAULT_SCHEMA}.employees`, field: "salary", transformations: [INDIRECT_WINDOW] },
+      ]),
+    );
   });
 });
 
 // =============================================================================
-// COMPLEX TESTS - Multiple Clauses Combined
+// SECTION 3: COMBINED CLAUSES
 // =============================================================================
 
-describe("getExtendedLineage - JOIN + WHERE", () => {
-  test("JOIN with WHERE filter", () => {
+describe("Combined Clauses: JOIN + WHERE", () => {
+  test("JOIN with WHERE on both tables", () => {
     const sql = `
-      SELECT u.id, u.name, o.total
+      SELECT u.id, o.total
       FROM users u
       JOIN orders o ON u.id = o.user_id
       WHERE u.status = 'active' AND o.total > 100
     `;
-
     const ast = parseSQL(sql);
-    const schema = createNamespace("trino", [
-      createTable("users", ["id", "name", "status"]),
-      createTable("orders", ["id", "user_id", "total"]),
-    ]);
-
+    const schema = createNamespace("ns", [USERS_TABLE, createTable(`${DEFAULT_SCHEMA}.orders`, ["user_id", "total"])]);
     const result = getExtendedLineage(ast as Select, schema);
 
-    // JOIN lineage
-    const joinLineage = findBySubtype(result.dataset, "JOIN");
-    expect(joinLineage.length).toBe(2);
-
-    // FILTER lineage
-    const filterLineage = findBySubtype(result.dataset, "FILTER");
-    expect(filterLineage.length).toBe(2);
-    expect(filterLineage).toContainEqual({
-      namespace: "trino",
-      name: "users",
-      field: "status",
-      transformations: [INDIRECT_FILTER],
-    });
-    expect(filterLineage).toContainEqual({
-      namespace: "trino",
-      name: "orders",
-      field: "total",
-      transformations: [INDIRECT_FILTER],
-    });
-  });
-});
-
-describe("getExtendedLineage - JOIN + GROUP BY", () => {
-  test("JOIN with GROUP BY aggregation", () => {
-    const sql = `
-      SELECT 
-        u.country,
-        COUNT(o.id) as order_count,
-        SUM(o.total) as total_revenue
-      FROM users u
-      JOIN orders o ON u.id = o.user_id
-      GROUP BY u.country
-    `;
-
-    const ast = parseSQL(sql);
-    const schema = createNamespace("trino", [
-      createTable("users", ["id", "country"]),
-      createTable("orders", ["id", "user_id", "total"]),
-    ]);
-
-    const result = getExtendedLineage(ast as Select, schema);
-
-    // Field-level lineage with aggregations
-    expect(result.fields.order_count?.inputFields[0]?.transformations).toContainEqual(
-      expect.objectContaining({ type: "DIRECT", subtype: "AGGREGATION" }),
+    expect(sortDataset(result.dataset)).toEqual(
+      sortDataset([
+        { namespace: "ns", name: USERS_TABLE.name, field: "id", transformations: [INDIRECT_JOIN] },
+        { namespace: "ns", name: `${DEFAULT_SCHEMA}.orders`, field: "user_id", transformations: [INDIRECT_JOIN] },
+        { namespace: "ns", name: USERS_TABLE.name, field: "status", transformations: [INDIRECT_FILTER] },
+        { namespace: "ns", name: `${DEFAULT_SCHEMA}.orders`, field: "total", transformations: [INDIRECT_FILTER] },
+      ]),
     );
-
-    // JOIN lineage
-    const joinLineage = findBySubtype(result.dataset, "JOIN");
-    expect(joinLineage.length).toBe(2);
-
-    // GROUP BY lineage
-    const groupByLineage = findBySubtype(result.dataset, "GROUP_BY");
-    expect(groupByLineage.length).toBe(1);
-    expect(groupByLineage).toContainEqual({
-      namespace: "trino",
-      name: "users",
-      field: "country",
-      transformations: [INDIRECT_GROUP_BY],
-    });
   });
 });
 
-describe("getExtendedLineage - WHERE + GROUP BY + HAVING", () => {
+describe("Combined Clauses: WHERE + GROUP BY + HAVING", () => {
   test("full aggregation query", () => {
     const sql = `
-      SELECT 
-        department,
-        COUNT(*) as employee_count,
-        AVG(salary) as avg_salary
+      SELECT department, COUNT(*) as cnt, AVG(salary) as avg_sal
       FROM employees
       WHERE status = 'active'
       GROUP BY department
       HAVING COUNT(*) > 5
     `;
-
     const ast = parseSQL(sql);
-    const schema = createNamespace("trino", [createTable("employees", ["id", "department", "salary", "status"])]);
-
+    const schema = createNamespace("ns", [createTable(`${DEFAULT_SCHEMA}.employees`, ["id", "department", "salary", "status"])]);
     const result = getExtendedLineage(ast as Select, schema);
 
-    // FILTER lineage (from WHERE)
-    const filterLineage = findBySubtype(result.dataset, "FILTER");
-    expect(filterLineage).toContainEqual({
-      namespace: "trino",
-      name: "employees",
-      field: "status",
-      transformations: [INDIRECT_FILTER],
-    });
-
-    // GROUP BY lineage
-    const groupByLineage = findBySubtype(result.dataset, "GROUP_BY");
-    expect(groupByLineage).toContainEqual({
-      namespace: "trino",
-      name: "employees",
-      field: "department",
-      transformations: [INDIRECT_GROUP_BY],
-    });
+    expect(sortDataset(result.dataset)).toEqual(
+      sortDataset([
+        { namespace: "ns", name: `${DEFAULT_SCHEMA}.employees`, field: "status", transformations: [INDIRECT_FILTER] },
+        { namespace: "ns", name: `${DEFAULT_SCHEMA}.employees`, field: "department", transformations: [INDIRECT_GROUP_BY] },
+        // HAVING COUNT(*) doesn't add field lineage since COUNT(*) doesn't reference a column
+      ]),
+    );
   });
 });
 
-describe("getExtendedLineage - Full query with all clauses", () => {
-  test("comprehensive query with all indirect lineage types", () => {
+describe("Combined Clauses: GROUP BY + ORDER BY", () => {
+  test("aggregation with sorting", () => {
     const sql = `
-      SELECT 
-        u.country,
-        COUNT(u.id) as user_count,
-        SUM(o.total) as total_revenue,
-        ROW_NUMBER() OVER (ORDER BY SUM(o.total) DESC) as revenue_rank
-      FROM users u
-      JOIN orders o ON u.id = o.user_id
-      WHERE u.status = 'active' AND o.order_date >= '2024-01-01'
-      GROUP BY u.country
-      HAVING SUM(o.total) > 1000
-      ORDER BY total_revenue DESC
-    `;
-
-    const ast = parseSQL(sql);
-    const schema = createNamespace("trino", [
-      createTable("users", ["id", "country", "status"]),
-      createTable("orders", ["id", "user_id", "total", "order_date"]),
-    ]);
-
-    const result = getExtendedLineage(ast as Select, schema);
-
-    // Field-level lineage
-    expect(result.fields.country).toBeDefined();
-    expect(result.fields.user_count).toBeDefined();
-    expect(result.fields.total_revenue).toBeDefined();
-
-    // Dataset-level lineage
-    expect(result.dataset).toBeDefined();
-    expect(result.dataset!.length).toBeGreaterThan(0);
-
-    // JOIN lineage
-    const joinLineage = findBySubtype(result.dataset, "JOIN");
-    expect(joinLineage.length).toBeGreaterThan(0);
-
-    // FILTER lineage (from WHERE)
-    const filterLineage = findBySubtype(result.dataset, "FILTER");
-    expect(filterLineage.length).toBeGreaterThan(0);
-
-    // GROUP BY lineage
-    const groupByLineage = findBySubtype(result.dataset, "GROUP_BY");
-    expect(groupByLineage.length).toBeGreaterThan(0);
-
-    // SORT lineage (from ORDER BY)
-    // Note: ORDER BY total_revenue references an alias, may not resolve to base column
-  });
-
-  test("analytics query with aggregate window functions and multiple joins", () => {
-    const sql = `
-      SELECT 
-        d.name as department_name,
-        e.name as employee_name,
-        e.salary,
-        SUM(e.salary) OVER (PARTITION BY e.department_id ORDER BY e.salary DESC) as running_salary
-      FROM employees e
-      JOIN departments d ON e.department_id = d.id
-      WHERE e.status = 'active'
-      ORDER BY d.name, e.salary DESC
-    `;
-
-    const ast = parseSQL(sql);
-    const schema = createNamespace("trino", [
-      createTable("employees", ["id", "name", "department_id", "salary", "status"]),
-      createTable("departments", ["id", "name"]),
-    ]);
-
-    const result = getExtendedLineage(ast as Select, schema);
-
-    // JOIN lineage
-    const joinLineage = findBySubtype(result.dataset, "JOIN");
-    expect(joinLineage.length).toBe(2);
-
-    // WINDOW lineage from PARTITION BY department_id and ORDER BY salary DESC in OVER clause
-    const windowLineage = findBySubtype(result.dataset, "WINDOW");
-    expect(windowLineage.length).toBe(2);
-    expect(windowLineage).toContainEqual({
-      namespace: "trino",
-      name: "employees",
-      field: "department_id",
-      transformations: [INDIRECT_WINDOW],
-    });
-    expect(windowLineage).toContainEqual({
-      namespace: "trino",
-      name: "employees",
-      field: "salary",
-      transformations: [INDIRECT_WINDOW],
-    });
-
-    // FILTER lineage
-    const filterLineage = findBySubtype(result.dataset, "FILTER");
-    expect(filterLineage).toContainEqual({
-      namespace: "trino",
-      name: "employees",
-      field: "status",
-      transformations: [INDIRECT_FILTER],
-    });
-
-    // SORT lineage
-    const sortLineage = findBySubtype(result.dataset, "SORT");
-    expect(sortLineage).toContainEqual({
-      namespace: "trino",
-      name: "departments",
-      field: "name",
-      transformations: [INDIRECT_SORT],
-    });
-    expect(sortLineage).toContainEqual({
-      namespace: "trino",
-      name: "employees",
-      field: "salary",
-      transformations: [INDIRECT_SORT],
-    });
-
-    // Field-level lineage captures the aggregation
-    expect(result.fields.running_salary?.inputFields).toContainEqual({
-      namespace: "trino",
-      name: "employees",
-      field: "salary",
-      transformations: [DIRECT_AGGREGATION],
-    });
-  });
-});
-
-// =============================================================================
-// CTE (WITH clause) TESTS
-// =============================================================================
-
-describe("getExtendedLineage - WITH clause (CTEs)", () => {
-  test("simple CTE with filter - dataset lineage propagation", () => {
-    const sql = `
-      WITH active_users AS (
-        SELECT id, name, country
-        FROM users
-        WHERE status = 'active'
-      )
-      SELECT country, COUNT(*) as count
-      FROM active_users
+      SELECT country, COUNT(*) as cnt
+      FROM users
       GROUP BY country
+      ORDER BY cnt DESC
     `;
-
     const ast = parseSQL(sql);
-    const schema = createNamespace("trino", [createTable("users", ["id", "name", "country", "status"])]);
-
+    const schema = createNamespace("ns", [USERS_TABLE]);
     const result = getExtendedLineage(ast as Select, schema);
 
-    // Field-level lineage should trace back to users table
-    expect(result.fields.country?.inputFields).toContainEqual({
-      namespace: "trino",
-      name: "users",
-      field: "country",
-      transformations: [DIRECT_IDENTITY],
+    // ORDER BY cnt references alias, which resolves to COUNT(*) - no additional lineage
+    expect(result.dataset).toEqual([
+      { namespace: "ns", name: USERS_TABLE.name, field: "country", transformations: [INDIRECT_GROUP_BY] },
+    ]);
+  });
+});
+
+describe("Combined Clauses: WINDOW + WHERE + ORDER BY", () => {
+  test("window function with filter and sort", () => {
+    const sql = `
+      SELECT 
+        id,
+        SUM(amount) OVER (PARTITION BY category ORDER BY created_at) as running_total
+      FROM transactions
+      WHERE status = 'completed'
+      ORDER BY created_at
+    `;
+    const ast = parseSQL(sql);
+    const schema = createNamespace("ns", [
+      createTable(`${DEFAULT_SCHEMA}.transactions`, ["id", "amount", "category", "created_at", "status"]),
+    ]);
+    const result = getExtendedLineage(ast as Select, schema);
+
+    expect(sortDataset(result.dataset)).toEqual(
+      sortDataset([
+        { namespace: "ns", name: `${DEFAULT_SCHEMA}.transactions`, field: "status", transformations: [INDIRECT_FILTER] },
+        { namespace: "ns", name: `${DEFAULT_SCHEMA}.transactions`, field: "category", transformations: [INDIRECT_WINDOW] },
+        { namespace: "ns", name: `${DEFAULT_SCHEMA}.transactions`, field: "created_at", transformations: [INDIRECT_WINDOW] },
+        { namespace: "ns", name: `${DEFAULT_SCHEMA}.transactions`, field: "created_at", transformations: [INDIRECT_SORT] },
+      ]),
+    );
+  });
+});
+
+// =============================================================================
+// SECTION 4: CTEs (WITH clause)
+// =============================================================================
+
+describe("CTEs: Basic WITH clause", () => {
+  test("simple CTE propagates field lineage", () => {
+    const sql = `
+      WITH active AS (
+        SELECT id, name FROM users WHERE status = 'active'
+      )
+      SELECT id, name FROM active
+    `;
+    const ast = parseSQL(sql);
+    const schema = createNamespace("ns", [USERS_TABLE]);
+    const result = getExtendedLineage(ast as Select, schema);
+
+    expect(result.fields).toEqual({
+      id: {
+        inputFields: [{ namespace: "ns", name: USERS_TABLE.name, field: "id", transformations: [DIRECT_IDENTITY] }],
+      },
+      name: {
+        inputFields: [{ namespace: "ns", name: USERS_TABLE.name, field: "name", transformations: [DIRECT_IDENTITY] }],
+      },
     });
 
-    // Dataset-level lineage from the CTE's WHERE clause should be propagated
-    const filterLineage = findBySubtype(result.dataset, "FILTER");
-    expect(filterLineage.length).toBe(1);
-    expect(filterLineage).toContainEqual({
-      namespace: "trino",
-      name: "users",
-      field: "status",
-      transformations: [INDIRECT_FILTER],
-    });
-
-    // GROUP BY from outer query should also be captured (but references the CTE, not direct table)
-    const groupByLineage = findBySubtype(result.dataset, "GROUP_BY");
-    // country GROUP BY references active_users.country which resolves to users.country
-    expect(groupByLineage.length).toBe(0); // GROUP BY references CTE alias, not resolved to base table
+    // Dataset lineage should include the WHERE from the CTE
+    expect(result.dataset).toEqual([
+      { namespace: "ns", name: USERS_TABLE.name, field: "status", transformations: [INDIRECT_FILTER] },
+    ]);
   });
 
-  test("multiple CTEs", () => {
+  test("CTE with aggregation", () => {
+    const sql = `
+      WITH summary AS (
+        SELECT department, SUM(salary) as total_salary
+        FROM employees
+        GROUP BY department
+      )
+      SELECT department, total_salary FROM summary
+    `;
+    const ast = parseSQL(sql);
+    const schema = createNamespace("ns", [createTable(`${DEFAULT_SCHEMA}.employees`, ["department", "salary"])]);
+    const result = getExtendedLineage(ast as Select, schema);
+
+    expect(result.fields).toEqual({
+      department: {
+        inputFields: [
+          { namespace: "ns", name: `${DEFAULT_SCHEMA}.employees`, field: "department", transformations: [DIRECT_IDENTITY] },
+        ],
+      },
+      total_salary: {
+        inputFields: [
+          { namespace: "ns", name: `${DEFAULT_SCHEMA}.employees`, field: "salary", transformations: [DIRECT_AGGREGATION] },
+        ],
+      },
+    });
+
+    // GROUP BY from CTE should be in dataset lineage
+    expect(result.dataset).toEqual([
+      { namespace: "ns", name: `${DEFAULT_SCHEMA}.employees`, field: "department", transformations: [INDIRECT_GROUP_BY] },
+    ]);
+  });
+});
+
+describe("CTEs: Multiple CTEs", () => {
+  test("two CTEs with JOIN", () => {
     const sql = `
       WITH 
-      active_users AS (
-        SELECT id, name, country FROM users WHERE status = 'active'
+      users_cte AS (
+        SELECT id, name FROM users WHERE status = 'active'
       ),
-      user_orders AS (
+      orders_cte AS (
         SELECT user_id, SUM(total) as total_spent FROM orders GROUP BY user_id
       )
-      SELECT 
-        au.name,
-        au.country,
-        uo.total_spent
-      FROM active_users au
-      JOIN user_orders uo ON au.id = uo.user_id
+      SELECT u.name, o.total_spent
+      FROM users_cte u
+      JOIN orders_cte o ON u.id = o.user_id
     `;
-
     const ast = parseSQL(sql);
-    const schema = createNamespace("trino", [
-      createTable("users", ["id", "name", "country", "status"]),
-      createTable("orders", ["id", "user_id", "total"]),
-    ]);
-
+    const schema = createNamespace("ns", [USERS_TABLE, createTable(`${DEFAULT_SCHEMA}.orders`, ["user_id", "total"])]);
     const result = getExtendedLineage(ast as Select, schema);
 
-    // ========== Field-level lineage ==========
-    
-    // name traces back to users.name with IDENTITY
-    expect(result.fields.name).toBeDefined();
-    expect(result.fields.name?.inputFields.length).toBe(1);
-    expect(result.fields.name?.inputFields).toContainEqual({
-      namespace: "trino",
-      name: "users",
-      field: "name",
-      transformations: [DIRECT_IDENTITY],
+    expect(result.fields).toEqual({
+      name: {
+        inputFields: [{ namespace: "ns", name: USERS_TABLE.name, field: "name", transformations: [DIRECT_IDENTITY] }],
+      },
+      total_spent: {
+        inputFields: [
+          { namespace: "ns", name: `${DEFAULT_SCHEMA}.orders`, field: "total", transformations: [DIRECT_AGGREGATION] },
+        ],
+      },
     });
 
-    // country traces back to users.country with IDENTITY
-    expect(result.fields.country).toBeDefined();
-    expect(result.fields.country?.inputFields.length).toBe(1);
-    expect(result.fields.country?.inputFields).toContainEqual({
-      namespace: "trino",
-      name: "users",
-      field: "country",
-      transformations: [DIRECT_IDENTITY],
-    });
-
-    // total_spent traces back to orders.total with AGGREGATION (through SUM in CTE)
-    expect(result.fields.total_spent).toBeDefined();
-    expect(result.fields.total_spent?.inputFields.length).toBe(1);
-    expect(result.fields.total_spent?.inputFields).toContainEqual({
-      namespace: "trino",
-      name: "orders",
-      field: "total",
-      transformations: [DIRECT_AGGREGATION],
-    });
-
-    // ========== Dataset-level lineage ==========
-    // Dataset lineage from CTEs is now propagated to outer query
-    
-    // FILTER from active_users CTE (WHERE status = 'active')
-    const filterLineage = findBySubtype(result.dataset, "FILTER");
-    expect(filterLineage.length).toBe(1);
-    expect(filterLineage).toContainEqual({
-      namespace: "trino",
-      name: "users",
-      field: "status",
-      transformations: [INDIRECT_FILTER],
-    });
-
-    // GROUP BY from user_orders CTE (GROUP BY user_id)
-    const groupByLineage = findBySubtype(result.dataset, "GROUP_BY");
-    expect(groupByLineage.length).toBe(1);
-    expect(groupByLineage).toContainEqual({
-      namespace: "trino",
-      name: "orders",
-      field: "user_id",
-      transformations: [INDIRECT_GROUP_BY],
-    });
-
-    // Verify we have the correct number of output fields
-    expect(Object.keys(result.fields).length).toBe(3);
+    expect(sortDataset(result.dataset)).toEqual(
+      sortDataset([
+        { namespace: "ns", name: USERS_TABLE.name, field: "status", transformations: [INDIRECT_FILTER] },
+        { namespace: "ns", name: `${DEFAULT_SCHEMA}.orders`, field: "user_id", transformations: [INDIRECT_GROUP_BY] },
+      ]),
+    );
   });
+});
 
-  test("nested CTEs with complex transformations", () => {
+describe("CTEs: Nested transformations through CTEs", () => {
+  test("transformation propagation through nested CTEs", () => {
     const sql = `
       WITH 
-      base_data AS (
-        SELECT 
-          product_id,
-          store_id,
-          quantity * price as revenue
-        FROM sales
-        WHERE sale_date >= '2024-01-01'
+      base AS (
+        SELECT id, quantity * price as revenue FROM sales WHERE sale_date >= '2024-01-01'
       ),
-      store_summary AS (
-        SELECT 
-          store_id,
-          SUM(revenue) as total_revenue
-        FROM base_data
-        GROUP BY store_id
+      summary AS (
+        SELECT SUM(revenue) as total_revenue FROM base
       )
-      SELECT 
-        s.name as store_name,
-        ss.total_revenue
-      FROM store_summary ss
-      JOIN stores s ON ss.store_id = s.id
-      ORDER BY ss.total_revenue DESC
+      SELECT total_revenue FROM summary
     `;
-
     const ast = parseSQL(sql);
-    const schema = createNamespace("trino", [
-      createTable("sales", ["id", "product_id", "store_id", "quantity", "price", "sale_date"]),
-      createTable("stores", ["id", "name"]),
-    ]);
-
+    const schema = createNamespace("ns", [createTable(`${DEFAULT_SCHEMA}.sales`, ["id", "quantity", "price", "sale_date"])]);
     const result = getExtendedLineage(ast as Select, schema);
 
-    // ========== Field-level lineage ==========
-    
-    // store_name should trace back to stores.name
-    expect(result.fields.store_name).toBeDefined();
-    expect(result.fields.store_name?.inputFields).toContainEqual({
-      namespace: "trino",
-      name: "stores",
-      field: "name",
-      transformations: [DIRECT_IDENTITY],
-    });
+    // total_revenue -> SUM(revenue) -> quantity * price
+    expect(sortInputFields(result.fields)).toEqual(
+      sortInputFields({
+        total_revenue: {
+          inputFields: [
+            { namespace: "ns", name: `${DEFAULT_SCHEMA}.sales`, field: "price", transformations: [DIRECT_AGGREGATION] },
+            { namespace: "ns", name: `${DEFAULT_SCHEMA}.sales`, field: "quantity", transformations: [DIRECT_AGGREGATION] },
+          ],
+        },
+      }),
+    );
 
-    // total_revenue should trace back through CTEs to quantity and price with AGGREGATION
-    expect(result.fields.total_revenue).toBeDefined();
-    expect(result.fields.total_revenue?.inputFields.length).toBe(2);
-    expect(result.fields.total_revenue?.inputFields).toContainEqual({
-      namespace: "trino",
-      name: "sales",
-      field: "quantity",
-      transformations: [DIRECT_AGGREGATION],
-    });
-    expect(result.fields.total_revenue?.inputFields).toContainEqual({
-      namespace: "trino",
-      name: "sales",
-      field: "price",
-      transformations: [DIRECT_AGGREGATION],
-    });
-
-    // ========== Dataset-level lineage ==========
-    
-    // JOIN lineage - should capture the join between store_summary and stores
-    const joinLineage = findBySubtype(result.dataset, "JOIN");
-    expect(joinLineage.length).toBe(1);
-    expect(joinLineage).toContainEqual({
-      namespace: "trino",
-      name: "stores",
-      field: "id",
-      transformations: [INDIRECT_JOIN],
-    });
-
-    // FILTER lineage - propagated from base_data CTE (WHERE sale_date >= '2024-01-01')
-    const filterLineage = findBySubtype(result.dataset, "FILTER");
-    expect(filterLineage.length).toBe(1);
-    expect(filterLineage).toContainEqual({
-      namespace: "trino",
-      name: "sales",
-      field: "sale_date",
-      transformations: [INDIRECT_FILTER],
-    });
-
-    // Note: GROUP BY in store_summary (GROUP BY store_id) references base_data.store_id
-    // which is a CTE column, not a direct table column. Dataset lineage extraction 
-    // for GROUP BY/ORDER BY only resolves to direct table columns, not CTE columns.
-    // This is a known limitation - CTE-to-CTE indirect lineage is not resolved.
-    const groupByLineage = findBySubtype(result.dataset, "GROUP_BY");
-    expect(groupByLineage.length).toBe(0);
+    // Dataset lineage includes WHERE from base CTE
+    expect(result.dataset).toEqual([
+      { namespace: "ns", name: `${DEFAULT_SCHEMA}.sales`, field: "sale_date", transformations: [INDIRECT_FILTER] },
+    ]);
   });
 });
 
 // =============================================================================
-// SUBQUERY TESTS
+// SECTION 5: SUBQUERIES
 // =============================================================================
 
-describe("getExtendedLineage - Subqueries", () => {
-  test("subquery in FROM clause", () => {
+describe("Subqueries: FROM clause subquery", () => {
+  test("simple subquery in FROM", () => {
     const sql = `
-      SELECT 
-        sub.country,
-        sub.user_count
+      SELECT sub.country, sub.cnt
       FROM (
-        SELECT country, COUNT(*) as user_count
+        SELECT country, COUNT(*) as cnt
         FROM users
         WHERE status = 'active'
         GROUP BY country
       ) sub
-      ORDER BY sub.user_count DESC
     `;
-
     const ast = parseSQL(sql);
-    const schema = createNamespace("trino", [createTable("users", ["id", "country", "status"])]);
-
+    const schema = createNamespace("ns", [USERS_TABLE]);
     const result = getExtendedLineage(ast as Select, schema);
 
-    expect(result.fields.country?.inputFields).toContainEqual({
-      namespace: "trino",
-      name: "users",
-      field: "country",
-      transformations: [DIRECT_IDENTITY],
-    });
-  });
-});
-
-// =============================================================================
-// EDGE CASES AND SPECIAL SCENARIOS
-// =============================================================================
-
-describe("getExtendedLineage - Edge cases", () => {
-  test("same column used in multiple contexts", () => {
-    const sql = `
-      SELECT 
-        status,
-        COUNT(*) as count
-      FROM users
-      WHERE status != 'deleted'
-      GROUP BY status
-      ORDER BY status
-    `;
-
-    const ast = parseSQL(sql);
-    const schema = createNamespace("trino", [createTable("users", ["id", "status"])]);
-
-    const result = getExtendedLineage(ast as Select, schema);
-
-    // status appears in:
-    // 1. SELECT (DIRECT/IDENTITY)
-    // 2. WHERE (INDIRECT/FILTER)
-    // 3. GROUP BY (INDIRECT/GROUP_BY)
-    // 4. ORDER BY (INDIRECT/SORT)
-
-    expect(result.fields.status?.inputFields).toContainEqual({
-      namespace: "trino",
-      name: "users",
-      field: "status",
-      transformations: [DIRECT_IDENTITY],
-    });
-
-    const filterLineage = findFieldBySubtype(result.dataset, "status", "FILTER");
-    expect(filterLineage).toBeDefined();
-
-    const groupByLineage = findFieldBySubtype(result.dataset, "status", "GROUP_BY");
-    expect(groupByLineage).toBeDefined();
-
-    const sortLineage = findFieldBySubtype(result.dataset, "status", "SORT");
-    expect(sortLineage).toBeDefined();
-  });
-
-  test("column from multiple tables with same name", () => {
-    const sql = `
-      SELECT u.name as user_name, p.name as product_name
-      FROM users u
-      JOIN products p ON u.favorite_product_id = p.id
-      WHERE u.name LIKE 'A%' AND p.name LIKE 'Widget%'
-    `;
-
-    const ast = parseSQL(sql);
-    const schema = createNamespace("trino", [
-      createTable("users", ["id", "name", "favorite_product_id"]),
-      createTable("products", ["id", "name"]),
+    expect(result.fields.country?.inputFields).toEqual([
+      { namespace: "ns", name: USERS_TABLE.name, field: "country", transformations: [DIRECT_IDENTITY] },
     ]);
 
-    const result = getExtendedLineage(ast as Select, schema);
-
-    // Field-level lineage should distinguish the two name columns
-    expect(result.fields.user_name?.inputFields).toContainEqual({
-      namespace: "trino",
-      name: "users",
-      field: "name",
-      transformations: [DIRECT_IDENTITY],
-    });
-    expect(result.fields.product_name?.inputFields).toContainEqual({
-      namespace: "trino",
-      name: "products",
-      field: "name",
-      transformations: [DIRECT_IDENTITY],
-    });
-
-    // FILTER lineage should have both name columns
-    const filterLineage = findBySubtype(result.dataset, "FILTER");
-    expect(filterLineage).toContainEqual({
-      namespace: "trino",
-      name: "users",
-      field: "name",
-      transformations: [INDIRECT_FILTER],
-    });
-    expect(filterLineage).toContainEqual({
-      namespace: "trino",
-      name: "products",
-      field: "name",
-      transformations: [INDIRECT_FILTER],
-    });
-  });
-
-  test("deduplication of dataset lineage", () => {
-    const sql = `
-      SELECT id, name
-      FROM users
-      WHERE status = 'active' AND status != 'banned'
-    `;
-
-    const ast = parseSQL(sql);
-    const schema = createNamespace("trino", [createTable("users", ["id", "name", "status"])]);
-
-    const result = getExtendedLineage(ast as Select, schema);
-
-    // Even though status appears twice in WHERE, it should be deduplicated
-    const filterLineage = findBySubtype(result.dataset, "FILTER");
-    const statusFilters = filterLineage.filter((f) => f.field === "status");
-    expect(statusFilters.length).toBe(1);
-  });
-
-  test("empty dataset lineage when no indirect clauses", () => {
-    const sql = `SELECT id, UPPER(name) as upper_name FROM users`;
-
-    const ast = parseSQL(sql);
-    const schema = createNamespace("trino", [createTable("users", ["id", "name"])]);
-
-    const result = getExtendedLineage(ast as Select, schema);
-
-    expect(result.fields.id).toBeDefined();
-    expect(result.fields.upper_name).toBeDefined();
-    expect(result.dataset).toEqual([]);
-  });
-
-  test("transformation functions with masking", () => {
-    const sql = `
-      SELECT 
-        MD5(email) as email_hash,
-        SHA256(ssn) as ssn_hash,
-        MASK(phone) as masked_phone
-      FROM users
-    `;
-
-    const ast = parseSQL(sql);
-    const schema = createNamespace("trino", [createTable("users", ["id", "email", "ssn", "phone"])]);
-
-    const result = getExtendedLineage(ast as Select, schema);
-
-    // All three should have masking: true in their transformations
-    expect(result.fields.email_hash?.inputFields[0]?.transformations?.[0]?.masking).toBe(true);
-    expect(result.fields.ssn_hash?.inputFields[0]?.transformations?.[0]?.masking).toBe(true);
-    expect(result.fields.masked_phone?.inputFields[0]?.transformations?.[0]?.masking).toBe(true);
-  });
-
-  test("COUNT aggregation has masking flag", () => {
-    const sql = `
-      SELECT country, COUNT(id) as user_count
-      FROM users
-      GROUP BY country
-    `;
-
-    const ast = parseSQL(sql);
-    const schema = createNamespace("trino", [createTable("users", ["id", "country"])]);
-
-    const result = getExtendedLineage(ast as Select, schema);
-
-    // COUNT should have masking: true
-    expect(result.fields.user_count?.inputFields[0]?.transformations).toContainEqual({
-      type: "DIRECT",
-      subtype: "AGGREGATION",
-      masking: true,
-    });
-  });
-});
-
-// =============================================================================
-// REAL-WORLD COMPLEX QUERIES
-// =============================================================================
-
-describe("getExtendedLineage - Real-world complex queries", () => {
-  test("e-commerce analytics query", () => {
-    const sql = `
-      SELECT 
-        c.name as category_name,
-        p.name as product_name,
-        SUM(oi.quantity) as total_quantity,
-        SUM(oi.quantity * oi.unit_price) as total_revenue,
-        AVG(oi.unit_price) as avg_price
-      FROM categories c
-      JOIN products p ON c.id = p.category_id
-      JOIN order_items oi ON p.id = oi.product_id
-      JOIN orders o ON oi.order_id = o.id
-      WHERE o.status = 'completed' AND o.order_date >= '2024-01-01'
-      GROUP BY c.id, c.name, p.id, p.name
-      HAVING SUM(oi.quantity) > 10
-      ORDER BY c.name, total_revenue DESC
-    `;
-
-    const ast = parseSQL(sql);
-    const schema = createNamespace("trino", [
-      createTable("categories", ["id", "name"]),
-      createTable("products", ["id", "name", "category_id"]),
-      createTable("order_items", ["id", "order_id", "product_id", "quantity", "unit_price"]),
-      createTable("orders", ["id", "status", "order_date"]),
-    ]);
-
-    const result = getExtendedLineage(ast as Select, schema);
-
-    // ========== Field-level lineage ==========
-    
-    // category_name traces to categories.name
-    expect(result.fields.category_name).toBeDefined();
-    expect(result.fields.category_name?.inputFields).toContainEqual({
-      namespace: "trino",
-      name: "categories",
-      field: "name",
-      transformations: [DIRECT_IDENTITY],
-    });
-
-    // product_name traces to products.name
-    expect(result.fields.product_name).toBeDefined();
-    expect(result.fields.product_name?.inputFields).toContainEqual({
-      namespace: "trino",
-      name: "products",
-      field: "name",
-      transformations: [DIRECT_IDENTITY],
-    });
-
-    // total_quantity traces to order_items.quantity with AGGREGATION
-    expect(result.fields.total_quantity).toBeDefined();
-    expect(result.fields.total_quantity?.inputFields).toContainEqual({
-      namespace: "trino",
-      name: "order_items",
-      field: "quantity",
-      transformations: [DIRECT_AGGREGATION],
-    });
-
-    // total_revenue traces to both quantity and unit_price with AGGREGATION
-    expect(result.fields.total_revenue).toBeDefined();
-    expect(result.fields.total_revenue?.inputFields.length).toBe(2);
-    expect(result.fields.total_revenue?.inputFields).toContainEqual({
-      namespace: "trino",
-      name: "order_items",
-      field: "quantity",
-      transformations: [DIRECT_AGGREGATION],
-    });
-    expect(result.fields.total_revenue?.inputFields).toContainEqual({
-      namespace: "trino",
-      name: "order_items",
-      field: "unit_price",
-      transformations: [DIRECT_AGGREGATION],
-    });
-
-    // avg_price traces to order_items.unit_price with AGGREGATION
-    expect(result.fields.avg_price).toBeDefined();
-    expect(result.fields.avg_price?.inputFields).toContainEqual({
-      namespace: "trino",
-      name: "order_items",
-      field: "unit_price",
-      transformations: [DIRECT_AGGREGATION],
-    });
-
-    // ========== Dataset-level lineage ==========
-    
-    // JOIN lineage - 3 joins with 2 columns each = 6 join columns
-    const joinLineage = findBySubtype(result.dataset, "JOIN");
-    expect(joinLineage.length).toBe(6);
-    // First join: c.id = p.category_id
-    expect(joinLineage).toContainEqual({
-      namespace: "trino",
-      name: "categories",
-      field: "id",
-      transformations: [INDIRECT_JOIN],
-    });
-    expect(joinLineage).toContainEqual({
-      namespace: "trino",
-      name: "products",
-      field: "category_id",
-      transformations: [INDIRECT_JOIN],
-    });
-    // Second join: p.id = oi.product_id
-    expect(joinLineage).toContainEqual({
-      namespace: "trino",
-      name: "products",
-      field: "id",
-      transformations: [INDIRECT_JOIN],
-    });
-    expect(joinLineage).toContainEqual({
-      namespace: "trino",
-      name: "order_items",
-      field: "product_id",
-      transformations: [INDIRECT_JOIN],
-    });
-    // Third join: oi.order_id = o.id
-    expect(joinLineage).toContainEqual({
-      namespace: "trino",
-      name: "order_items",
-      field: "order_id",
-      transformations: [INDIRECT_JOIN],
-    });
-    expect(joinLineage).toContainEqual({
-      namespace: "trino",
-      name: "orders",
-      field: "id",
-      transformations: [INDIRECT_JOIN],
-    });
-
-    // FILTER lineage - status and order_date from WHERE clause
-    const filterLineage = findBySubtype(result.dataset, "FILTER");
-    expect(filterLineage.length).toBeGreaterThanOrEqual(2);
-    expect(filterLineage).toContainEqual({
-      namespace: "trino",
-      name: "orders",
-      field: "status",
-      transformations: [INDIRECT_FILTER],
-    });
-    expect(filterLineage).toContainEqual({
-      namespace: "trino",
-      name: "orders",
-      field: "order_date",
-      transformations: [INDIRECT_FILTER],
-    });
-    // HAVING also contributes to filter lineage
-    expect(filterLineage).toContainEqual({
-      namespace: "trino",
-      name: "order_items",
-      field: "quantity",
-      transformations: [INDIRECT_FILTER],
-    });
-
-    // GROUP BY lineage - c.id, c.name, p.id, p.name
-    const groupByLineage = findBySubtype(result.dataset, "GROUP_BY");
-    expect(groupByLineage.length).toBe(4);
-    expect(groupByLineage).toContainEqual({
-      namespace: "trino",
-      name: "categories",
-      field: "id",
-      transformations: [INDIRECT_GROUP_BY],
-    });
-    expect(groupByLineage).toContainEqual({
-      namespace: "trino",
-      name: "categories",
-      field: "name",
-      transformations: [INDIRECT_GROUP_BY],
-    });
-    expect(groupByLineage).toContainEqual({
-      namespace: "trino",
-      name: "products",
-      field: "id",
-      transformations: [INDIRECT_GROUP_BY],
-    });
-    expect(groupByLineage).toContainEqual({
-      namespace: "trino",
-      name: "products",
-      field: "name",
-      transformations: [INDIRECT_GROUP_BY],
-    });
-
-    // SORT lineage - c.name (total_revenue is alias, may not resolve)
-    const sortLineage = findBySubtype(result.dataset, "SORT");
-    expect(sortLineage).toContainEqual({
-      namespace: "trino",
-      name: "categories",
-      field: "name",
-      transformations: [INDIRECT_SORT],
-    });
-  });
-
-  test("HR analytics query with employee hierarchy", () => {
-    const sql = `
-      WITH department_stats AS (
-        SELECT 
-          department_id,
-          COUNT(*) as employee_count,
-          AVG(salary) as avg_salary,
-          SUM(salary) as total_salary
-        FROM employees
-        WHERE status = 'active'
-        GROUP BY department_id
-      )
-      SELECT 
-        d.name as department_name,
-        ds.employee_count,
-        ds.avg_salary,
-        ds.total_salary,
-        CASE 
-          WHEN ds.avg_salary > 100000 THEN 'High'
-          WHEN ds.avg_salary > 50000 THEN 'Medium'
-          ELSE 'Low'
-        END as salary_tier,
-        RANK() OVER (ORDER BY ds.total_salary DESC) as budget_rank
-      FROM department_stats ds
-      JOIN departments d ON ds.department_id = d.id
-      WHERE ds.employee_count >= 5
-      ORDER BY budget_rank
-    `;
-
-    const ast = parseSQL(sql);
-    const schema = createNamespace("trino", [
-      createTable("employees", ["id", "department_id", "salary", "status"]),
-      createTable("departments", ["id", "name"]),
-    ]);
-
-    const result = getExtendedLineage(ast as Select, schema);
-
-    // ========== Field-level lineage ==========
-    
-    // department_name traces to departments.name
-    expect(result.fields.department_name).toBeDefined();
-    expect(result.fields.department_name?.inputFields).toContainEqual({
-      namespace: "trino",
-      name: "departments",
-      field: "name",
-      transformations: [DIRECT_IDENTITY],
-    });
-
-    // employee_count comes from COUNT(*) in CTE - no specific field traced
-    expect(result.fields.employee_count).toBeDefined();
-    // COUNT(*) doesn't reference a specific column, so inputFields may be empty
-
-    // avg_salary traces to employees.salary with AGGREGATION
-    expect(result.fields.avg_salary).toBeDefined();
-    expect(result.fields.avg_salary?.inputFields).toContainEqual({
-      namespace: "trino",
-      name: "employees",
-      field: "salary",
-      transformations: [DIRECT_AGGREGATION],
-    });
-
-    // total_salary traces to employees.salary with AGGREGATION
-    expect(result.fields.total_salary).toBeDefined();
-    expect(result.fields.total_salary?.inputFields).toContainEqual({
-      namespace: "trino",
-      name: "employees",
-      field: "salary",
-      transformations: [DIRECT_AGGREGATION],
-    });
-
-    // salary_tier uses CASE with avg_salary in conditions - traces back to salary
-    expect(result.fields.salary_tier).toBeDefined();
-    expect(result.fields.salary_tier?.inputFields.length).toBeGreaterThan(0);
-    // The salary_tier CASE statement references avg_salary which traces to employees.salary
-    const salaryTierFields = result.fields.salary_tier?.inputFields.map((f) => f.field);
-    expect(salaryTierFields).toContain("salary");
-    // Should have CONDITION subtype for the WHEN clauses
-    const hasConditionTransformation = result.fields.salary_tier?.inputFields.some(
-      (f) => f.transformations?.some((t) => t.subtype === "CONDITION" || t.subtype === "AGGREGATION"),
+    // Dataset lineage from subquery
+    expect(sortDataset(result.dataset)).toEqual(
+      sortDataset([
+        { namespace: "ns", name: USERS_TABLE.name, field: "status", transformations: [INDIRECT_FILTER] },
+        { namespace: "ns", name: USERS_TABLE.name, field: "country", transformations: [INDIRECT_GROUP_BY] },
+      ]),
     );
-    expect(hasConditionTransformation).toBe(true);
-
-    // budget_rank from RANK() OVER (ORDER BY ds.total_salary DESC) - now tracks columns from OVER clause
-    expect(result.fields.budget_rank).toBeDefined();
-    // RANK() has no arguments, but it should capture total_salary from ORDER BY in OVER clause
-    // total_salary traces back through CTE to employees.salary
-    expect(result.fields.budget_rank?.inputFields.length).toBeGreaterThan(0);
-    const budgetRankFields = result.fields.budget_rank?.inputFields.map((f) => f.field);
-    expect(budgetRankFields).toContain("salary");
-
-    // ========== Dataset-level lineage ==========
-    
-    // JOIN lineage - ds.department_id = d.id
-    const joinLineage = findBySubtype(result.dataset, "JOIN");
-    expect(joinLineage.length).toBeGreaterThanOrEqual(1);
-    expect(joinLineage).toContainEqual({
-      namespace: "trino",
-      name: "departments",
-      field: "id",
-      transformations: [INDIRECT_JOIN],
-    });
-
-    // Verify total output field count
-    expect(Object.keys(result.fields).length).toBe(6);
-  });
-
-  test("time-series analysis query", () => {
-    const sql = `
-      SELECT 
-        DATE_TRUNC('month', event_date) as month,
-        event_type,
-        COUNT(*) as event_count,
-        COUNT(DISTINCT user_id) as unique_users
-      FROM events
-      WHERE event_date >= '2024-01-01'
-        AND event_type IN ('login', 'purchase', 'view')
-      GROUP BY DATE_TRUNC('month', event_date), event_type
-      ORDER BY month, event_type
-    `;
-
-    const ast = parseSQL(sql);
-    const schema = createNamespace("trino", [createTable("events", ["id", "event_date", "event_type", "user_id"])]);
-
-    const result = getExtendedLineage(ast as Select, schema);
-
-    // ========== Field-level lineage ==========
-    
-    // month traces to event_date with TRANSFORMATION (DATE_TRUNC)
-    expect(result.fields.month).toBeDefined();
-    expect(result.fields.month?.inputFields.length).toBe(1);
-    expect(result.fields.month?.inputFields[0]?.field).toBe("event_date");
-    expect(result.fields.month?.inputFields[0]?.transformations?.[0]?.subtype).toBe("TRANSFORMATION");
-
-    // event_type is direct IDENTITY
-    expect(result.fields.event_type).toBeDefined();
-    expect(result.fields.event_type?.inputFields).toContainEqual({
-      namespace: "trino",
-      name: "events",
-      field: "event_type",
-      transformations: [DIRECT_IDENTITY],
-    });
-
-    // event_count from COUNT(*) - no specific field
-    expect(result.fields.event_count).toBeDefined();
-
-    // unique_users from COUNT(DISTINCT user_id) - traces to user_id with AGGREGATION + masking
-    expect(result.fields.unique_users).toBeDefined();
-    expect(result.fields.unique_users?.inputFields.length).toBe(1);
-    expect(result.fields.unique_users?.inputFields[0]?.field).toBe("user_id");
-    expect(result.fields.unique_users?.inputFields[0]?.transformations?.[0]?.subtype).toBe("AGGREGATION");
-    expect(result.fields.unique_users?.inputFields[0]?.transformations?.[0]?.masking).toBe(true);
-
-    // Verify total output field count
-    expect(Object.keys(result.fields).length).toBe(4);
-
-    // ========== Dataset-level lineage ==========
-    
-    // FILTER lineage - event_date and event_type from WHERE
-    const filterLineage = findBySubtype(result.dataset, "FILTER");
-    expect(filterLineage.length).toBe(2);
-    expect(filterLineage).toContainEqual({
-      namespace: "trino",
-      name: "events",
-      field: "event_date",
-      transformations: [INDIRECT_FILTER],
-    });
-    expect(filterLineage).toContainEqual({
-      namespace: "trino",
-      name: "events",
-      field: "event_type",
-      transformations: [INDIRECT_FILTER],
-    });
-
-    // GROUP BY lineage - DATE_TRUNC('month', event_date) and event_type
-    const groupByLineage = findBySubtype(result.dataset, "GROUP_BY");
-    expect(groupByLineage.length).toBe(2);
-    expect(groupByLineage).toContainEqual({
-      namespace: "trino",
-      name: "events",
-      field: "event_date",
-      transformations: [INDIRECT_GROUP_BY],
-    });
-    expect(groupByLineage).toContainEqual({
-      namespace: "trino",
-      name: "events",
-      field: "event_type",
-      transformations: [INDIRECT_GROUP_BY],
-    });
-
-    // SORT lineage - month and event_type
-    // Note: month is an alias that may not resolve to base column
-    const sortLineage = findBySubtype(result.dataset, "SORT");
-    expect(sortLineage).toContainEqual({
-      namespace: "trino",
-      name: "events",
-      field: "event_type",
-      transformations: [INDIRECT_SORT],
-    });
-  });
-
-  test("multi-level aggregation query", () => {
-    const sql = `
-      WITH daily_sales AS (
-        SELECT 
-          store_id,
-          DATE(sale_timestamp) as sale_date,
-          SUM(amount) as daily_total
-        FROM sales
-        WHERE sale_timestamp >= '2024-01-01'
-        GROUP BY store_id, DATE(sale_timestamp)
-      ),
-      weekly_sales AS (
-        SELECT 
-          store_id,
-          DATE_TRUNC('week', sale_date) as week_start,
-          SUM(daily_total) as weekly_total,
-          AVG(daily_total) as daily_avg
-        FROM daily_sales
-        GROUP BY store_id, DATE_TRUNC('week', sale_date)
-      )
-      SELECT 
-        s.name as store_name,
-        s.region,
-        ws.week_start,
-        ws.weekly_total,
-        ws.daily_avg
-      FROM weekly_sales ws
-      JOIN stores s ON ws.store_id = s.id
-      ORDER BY s.region, ws.week_start
-    `;
-
-    const ast = parseSQL(sql);
-    const schema = createNamespace("trino", [
-      createTable("sales", ["id", "store_id", "sale_timestamp", "amount"]),
-      createTable("stores", ["id", "name", "region"]),
-    ]);
-
-    const result = getExtendedLineage(ast as Select, schema);
-
-    // ========== Field-level lineage ==========
-    
-    // store_name traces to stores.name
-    expect(result.fields.store_name).toBeDefined();
-    expect(result.fields.store_name?.inputFields).toContainEqual({
-      namespace: "trino",
-      name: "stores",
-      field: "name",
-      transformations: [DIRECT_IDENTITY],
-    });
-
-    // region traces to stores.region
-    expect(result.fields.region).toBeDefined();
-    expect(result.fields.region?.inputFields).toContainEqual({
-      namespace: "trino",
-      name: "stores",
-      field: "region",
-      transformations: [DIRECT_IDENTITY],
-    });
-
-    // week_start traces through CTEs to sale_timestamp (via DATE and DATE_TRUNC transformations)
-    expect(result.fields.week_start).toBeDefined();
-    expect(result.fields.week_start?.inputFields.length).toBe(1);
-    expect(result.fields.week_start?.inputFields[0]?.field).toBe("sale_timestamp");
-    expect(result.fields.week_start?.inputFields[0]?.name).toBe("sales");
-    // Should have TRANSFORMATION due to DATE_TRUNC/DATE functions
-    expect(result.fields.week_start?.inputFields[0]?.transformations?.[0]?.type).toBe("DIRECT");
-
-    // weekly_total traces through CTEs: SUM(SUM(amount)) -> amount with AGGREGATION
-    expect(result.fields.weekly_total).toBeDefined();
-    expect(result.fields.weekly_total?.inputFields.length).toBe(1);
-    expect(result.fields.weekly_total?.inputFields).toContainEqual({
-      namespace: "trino",
-      name: "sales",
-      field: "amount",
-      transformations: [DIRECT_AGGREGATION],
-    });
-
-    // daily_avg traces through CTEs: AVG(SUM(amount)) -> amount with AGGREGATION
-    expect(result.fields.daily_avg).toBeDefined();
-    expect(result.fields.daily_avg?.inputFields.length).toBe(1);
-    expect(result.fields.daily_avg?.inputFields).toContainEqual({
-      namespace: "trino",
-      name: "sales",
-      field: "amount",
-      transformations: [DIRECT_AGGREGATION],
-    });
-
-    // Verify total output field count
-    expect(Object.keys(result.fields).length).toBe(5);
-
-    // ========== Dataset-level lineage ==========
-    
-    // JOIN lineage - ws.store_id = s.id
-    // Note: store_id from CTE doesn't resolve, but stores.id does
-    const joinLineage = findBySubtype(result.dataset, "JOIN");
-    expect(joinLineage.length).toBeGreaterThanOrEqual(1);
-    expect(joinLineage).toContainEqual({
-      namespace: "trino",
-      name: "stores",
-      field: "id",
-      transformations: [INDIRECT_JOIN],
-    });
-
-    // SORT lineage - s.region and ws.week_start
-    // s.region should resolve to stores.region
-    const sortLineage = findBySubtype(result.dataset, "SORT");
-    expect(sortLineage.length).toBeGreaterThanOrEqual(1);
-    expect(sortLineage).toContainEqual({
-      namespace: "trino",
-      name: "stores",
-      field: "region",
-      transformations: [INDIRECT_SORT],
-    });
   });
 });
 
 // =============================================================================
-// TRANSFORMATION TYPE VERIFICATION
+// SECTION 6: SET OPERATIONS (UNION, INTERSECT, EXCEPT)
 // =============================================================================
 
-describe("getExtendedLineage - Transformation type verification", () => {
-  test("verifies all transformation types are correct", () => {
-    const sql = `
-      SELECT 
-        u.country,
-        COUNT(u.id) as user_count,
-        ROW_NUMBER() OVER (ORDER BY COUNT(u.id) DESC) as rank
-      FROM users u
-      JOIN orders o ON u.id = o.user_id
-      WHERE u.status = 'active'
-      GROUP BY u.country
-      ORDER BY u.country
-    `;
-
-    const ast = parseSQL(sql);
-    const schema = createNamespace("trino", [
-      createTable("users", ["id", "country", "status"]),
-      createTable("orders", ["id", "user_id"]),
-    ]);
-
-    const result = getExtendedLineage(ast as Select, schema);
-
-    // Verify JOIN transformation structure
-    const joinLineage = findBySubtype(result.dataset, "JOIN");
-    joinLineage.forEach((field) => {
-      expect(field.transformations?.[0]).toEqual(INDIRECT_JOIN);
-    });
-
-    // Verify FILTER transformation structure
-    const filterLineage = findBySubtype(result.dataset, "FILTER");
-    filterLineage.forEach((field) => {
-      expect(field.transformations?.[0]).toEqual(INDIRECT_FILTER);
-    });
-
-    // Verify GROUP_BY transformation structure
-    const groupByLineage = findBySubtype(result.dataset, "GROUP_BY");
-    groupByLineage.forEach((field) => {
-      expect(field.transformations?.[0]).toEqual(INDIRECT_GROUP_BY);
-    });
-
-    // Verify SORT transformation structure
-    const sortLineage = findBySubtype(result.dataset, "SORT");
-    sortLineage.forEach((field) => {
-      expect(field.transformations?.[0]).toEqual(INDIRECT_SORT);
-    });
-  });
-
-  test("field-level transformations for direct lineage", () => {
-    const sql = `
-      SELECT 
-        id,
-        name,
-        UPPER(email) as upper_email,
-        age + 1 as next_age,
-        COUNT(status) as status_count,
-        SUM(salary) as total_salary
-      FROM employees
-      GROUP BY id, name, email, age
-    `;
-
-    const ast = parseSQL(sql);
-    const schema = createNamespace("trino", [
-      createTable("employees", ["id", "name", "email", "age", "status", "salary"]),
-    ]);
-
-    const result = getExtendedLineage(ast as Select, schema);
-
-    // IDENTITY transformations
-    expect(result.fields.id?.inputFields[0]?.transformations).toContainEqual(DIRECT_IDENTITY);
-    expect(result.fields.name?.inputFields[0]?.transformations).toContainEqual(DIRECT_IDENTITY);
-
-    // TRANSFORMATION (function)
-    expect(result.fields.upper_email?.inputFields[0]?.transformations).toContainEqual(DIRECT_TRANSFORMATION);
-
-    // TRANSFORMATION (arithmetic)
-    expect(result.fields.next_age?.inputFields[0]?.transformations).toContainEqual(DIRECT_TRANSFORMATION);
-
-    // AGGREGATION (with masking for COUNT)
-    expect(result.fields.status_count?.inputFields[0]?.transformations).toContainEqual({
-      ...DIRECT_AGGREGATION,
-      masking: true,
-    });
-
-    // AGGREGATION (without masking for SUM)
-    expect(result.fields.total_salary?.inputFields[0]?.transformations).toContainEqual(DIRECT_AGGREGATION);
-  });
-});
-
-// Helper to parse SQL for PostgreSQL (which supports INTERSECT and EXCEPT)
-function parseSQLPostgres(sql: string): AST {
-  const result = parser.astify(sql, { database: "postgresql" });
-  const ast = Array.isArray(result) ? result[0] : result;
-
-  if (!ast) {
-    throw new Error("Failed to parse SQL");
-  }
-
-  return ast;
-}
-
-describe("getExtendedLineage - Set Operations (UNION, INTERSECT, EXCEPT)", () => {
-  test("UNION with WHERE clauses captures all dataset lineage", () => {
+describe("Set Operations: UNION", () => {
+  test("UNION merges field lineage from both sides", () => {
     const sql = `
       SELECT id, name FROM users WHERE status = 'active'
       UNION
       SELECT id, name FROM customers WHERE verified = true
     `;
-    const ast = parseSQLPostgres(sql);
-    const schema = createNamespace("postgres", [
-      createTable("users", ["id", "name", "status"]),
-      createTable("customers", ["id", "name", "verified"]),
-    ]);
-
-    const result = getExtendedLineage(ast as Select, schema);
-
-    // Field lineage should combine both sources
-    expect(result.fields.id?.inputFields).toHaveLength(2);
-    expect(result.fields.name?.inputFields).toHaveLength(2);
-
-    // Dataset lineage should include filters from both queries
-    const filterLineage = findBySubtype(result.dataset, "FILTER");
-    expect(filterLineage).toHaveLength(2);
-    expect(filterLineage).toContainEqual({
-      namespace: "postgres",
-      name: "users",
-      field: "status",
-      transformations: [INDIRECT_FILTER],
-    });
-    expect(filterLineage).toContainEqual({
-      namespace: "postgres",
-      name: "customers",
-      field: "verified",
-      transformations: [INDIRECT_FILTER],
-    });
-  });
-
-  test("INTERSECT with GROUP BY captures all dataset lineage", () => {
-    const sql = `
-      SELECT department_id FROM employees GROUP BY department_id
-      INTERSECT
-      SELECT department_id FROM managers GROUP BY department_id
-    `;
-    const ast = parseSQLPostgres(sql);
-    const schema = createNamespace("postgres", [
-      createTable("employees", ["id", "department_id"]),
-      createTable("managers", ["id", "department_id"]),
-    ]);
-
+    const ast = parseSQL(sql, "postgresql");
+    const schema = createNamespace("ns", [USERS_TABLE, createTable(`${DEFAULT_SCHEMA}.customers`, ["id", "name", "verified"])]);
     const result = getExtendedLineage(ast as Select, schema);
 
     // Field lineage combines both sources
-    expect(result.fields.department_id?.inputFields).toHaveLength(2);
+    expect(sortInputFields(result.fields)).toEqual(
+      sortInputFields({
+        id: {
+          inputFields: [
+            { namespace: "ns", name: USERS_TABLE.name, field: "id", transformations: [DIRECT_IDENTITY] },
+            { namespace: "ns", name: `${DEFAULT_SCHEMA}.customers`, field: "id", transformations: [DIRECT_IDENTITY] },
+          ],
+        },
+        name: {
+          inputFields: [
+            { namespace: "ns", name: USERS_TABLE.name, field: "name", transformations: [DIRECT_IDENTITY] },
+            { namespace: "ns", name: `${DEFAULT_SCHEMA}.customers`, field: "name", transformations: [DIRECT_IDENTITY] },
+          ],
+        },
+      }),
+    );
 
-    // Dataset lineage should include GROUP BY from both queries
-    const groupByLineage = findBySubtype(result.dataset, "GROUP_BY");
-    expect(groupByLineage).toHaveLength(2);
-    expect(groupByLineage).toContainEqual({
-      namespace: "postgres",
-      name: "employees",
-      field: "department_id",
-      transformations: [INDIRECT_GROUP_BY],
-    });
-    expect(groupByLineage).toContainEqual({
-      namespace: "postgres",
-      name: "managers",
-      field: "department_id",
-      transformations: [INDIRECT_GROUP_BY],
-    });
+    // Dataset lineage includes filters from both
+    expect(sortDataset(result.dataset)).toEqual(
+      sortDataset([
+        { namespace: "ns", name: USERS_TABLE.name, field: "status", transformations: [INDIRECT_FILTER] },
+        { namespace: "ns", name: `${DEFAULT_SCHEMA}.customers`, field: "verified", transformations: [INDIRECT_FILTER] },
+      ]),
+    );
   });
 
-  test("EXCEPT with ORDER BY captures all dataset lineage", () => {
+  test("UNION ALL with GROUP BY on both sides", () => {
     const sql = `
-      SELECT id FROM users ORDER BY created_at
-      EXCEPT
-      SELECT id FROM banned_users ORDER BY banned_at
+      SELECT department FROM employees GROUP BY department
+      UNION ALL
+      SELECT department FROM contractors GROUP BY department
     `;
-    const ast = parseSQLPostgres(sql);
-    const schema = createNamespace("postgres", [
-      createTable("users", ["id", "created_at"]),
-      createTable("banned_users", ["id", "banned_at"]),
+    const ast = parseSQL(sql, "postgresql");
+    const schema = createNamespace("ns", [
+      createTable(`${DEFAULT_SCHEMA}.employees`, ["id", "department"]),
+      createTable(`${DEFAULT_SCHEMA}.contractors`, ["id", "department"]),
     ]);
-
     const result = getExtendedLineage(ast as Select, schema);
 
-    // Dataset lineage should include ORDER BY from both queries
-    const sortLineage = findBySubtype(result.dataset, "SORT");
-    expect(sortLineage).toHaveLength(2);
-    expect(sortLineage).toContainEqual({
-      namespace: "postgres",
-      name: "users",
-      field: "created_at",
-      transformations: [INDIRECT_SORT],
-    });
-    expect(sortLineage).toContainEqual({
-      namespace: "postgres",
-      name: "banned_users",
-      field: "banned_at",
-      transformations: [INDIRECT_SORT],
-    });
+    expect(sortDataset(result.dataset)).toEqual(
+      sortDataset([
+        { namespace: "ns", name: `${DEFAULT_SCHEMA}.employees`, field: "department", transformations: [INDIRECT_GROUP_BY] },
+        { namespace: "ns", name: `${DEFAULT_SCHEMA}.contractors`, field: "department", transformations: [INDIRECT_GROUP_BY] },
+      ]),
+    );
   });
+});
 
-  test("chained UNION captures dataset lineage from all parts", () => {
+describe("Set Operations: INTERSECT", () => {
+  test("INTERSECT with ORDER BY on both sides", () => {
+    const sql = `
+      SELECT id FROM active_users ORDER BY created_at
+      INTERSECT
+      SELECT id FROM premium_users ORDER BY upgraded_at
+    `;
+    const ast = parseSQL(sql, "postgresql");
+    const schema = createNamespace("ns", [
+      createTable(`${DEFAULT_SCHEMA}.active_users`, ["id", "created_at"]),
+      createTable(`${DEFAULT_SCHEMA}.premium_users`, ["id", "upgraded_at"]),
+    ]);
+    const result = getExtendedLineage(ast as Select, schema);
+
+    expect(sortDataset(result.dataset)).toEqual(
+      sortDataset([
+        { namespace: "ns", name: `${DEFAULT_SCHEMA}.active_users`, field: "created_at", transformations: [INDIRECT_SORT] },
+        { namespace: "ns", name: `${DEFAULT_SCHEMA}.premium_users`, field: "upgraded_at", transformations: [INDIRECT_SORT] },
+      ]),
+    );
+  });
+});
+
+describe("Set Operations: EXCEPT", () => {
+  test("EXCEPT with WHERE on both sides", () => {
+    const sql = `
+      SELECT id FROM users WHERE active = true
+      EXCEPT
+      SELECT id FROM banned_users WHERE ban_date > '2024-01-01'
+    `;
+    const ast = parseSQL(sql, "postgresql");
+    const schema = createNamespace("ns", [USERS_TABLE, createTable(`${DEFAULT_SCHEMA}.banned_users`, ["id", "ban_date"])]);
+    const result = getExtendedLineage(ast as Select, schema);
+
+    expect(sortDataset(result.dataset)).toEqual(
+      sortDataset([
+        { namespace: "ns", name: USERS_TABLE.name, field: "active", transformations: [INDIRECT_FILTER] },
+        { namespace: "ns", name: `${DEFAULT_SCHEMA}.banned_users`, field: "ban_date", transformations: [INDIRECT_FILTER] },
+      ]),
+    );
+  });
+});
+
+describe("Set Operations: Chained", () => {
+  test("triple UNION with different clauses", () => {
     const sql = `
       SELECT id FROM users WHERE region = 'US'
       UNION
@@ -2653,61 +1372,808 @@ describe("getExtendedLineage - Set Operations (UNION, INTERSECT, EXCEPT)", () =>
       UNION
       SELECT id FROM vendors WHERE region = 'APAC'
     `;
-    const ast = parseSQLPostgres(sql);
-    const schema = createNamespace("postgres", [
-      createTable("users", ["id", "region"]),
-      createTable("customers", ["id", "region"]),
-      createTable("vendors", ["id", "region"]),
+    const ast = parseSQL(sql, "postgresql");
+    const schema = createNamespace("ns", [
+      USERS_TABLE,
+      createTable(`${DEFAULT_SCHEMA}.customers`, ["id", "region"]),
+      createTable(`${DEFAULT_SCHEMA}.vendors`, ["id", "region"]),
     ]);
-
     const result = getExtendedLineage(ast as Select, schema);
 
-    // Dataset lineage should include filters from all three queries
-    const filterLineage = findBySubtype(result.dataset, "FILTER");
-    expect(filterLineage).toHaveLength(3);
+    expect(sortDataset(result.dataset)).toEqual(
+      sortDataset([
+        { namespace: "ns", name: USERS_TABLE.name, field: "region", transformations: [INDIRECT_FILTER] },
+        { namespace: "ns", name: `${DEFAULT_SCHEMA}.customers`, field: "region", transformations: [INDIRECT_FILTER] },
+        { namespace: "ns", name: `${DEFAULT_SCHEMA}.vendors`, field: "region", transformations: [INDIRECT_FILTER] },
+      ]),
+    );
+  });
+});
+
+// =============================================================================
+// SECTION 7: STAR (*) EXPANSION
+// =============================================================================
+
+describe("Star Expansion", () => {
+  test("SELECT * expands to all columns", () => {
+    const sql = `SELECT * FROM users`;
+    const ast = parseSQL(sql);
+    const schema = createNamespace("ns", [USERS_TABLE]);
+    const result = getExtendedLineage(ast as Select, schema);
+
+    expect(result.fields).toEqual(
+      USERS_TABLE.columns.reduce(
+        (acc, col) => {
+          acc[col] = {
+            inputFields: [{ namespace: "ns", name: USERS_TABLE.name, field: col, transformations: [DIRECT_IDENTITY] }],
+          };
+          return acc;
+        },
+        {} as Record<string, any>,
+      ),
+    );
+  });
+
+  test("table.* with multiple tables", () => {
+    const sql = `SELECT u.*, o.total FROM users u JOIN orders o ON u.id = o.user_id`;
+    const ast = parseSQL(sql);
+    const schema = createNamespace("ns", [USERS_TABLE, createTable(`${DEFAULT_SCHEMA}.orders`, ["user_id", "total"])]);
+    const result = getExtendedLineage(ast as Select, schema);
+
+    expect(result.fields.id?.inputFields).toEqual([
+      { namespace: "ns", name: USERS_TABLE.name, field: "id", transformations: [DIRECT_IDENTITY] },
+    ]);
+    expect(result.fields.name?.inputFields).toEqual([
+      { namespace: "ns", name: USERS_TABLE.name, field: "name", transformations: [DIRECT_IDENTITY] },
+    ]);
+    expect(result.fields.total?.inputFields).toEqual([
+      { namespace: "ns", name: `${DEFAULT_SCHEMA}.orders`, field: "total", transformations: [DIRECT_IDENTITY] },
+    ]);
+  });
+});
+
+// =============================================================================
+// SECTION 8: EDGE CASES
+// =============================================================================
+
+describe("Edge Cases", () => {
+  test("same column in multiple contexts", () => {
+    const sql = `
+      SELECT status, COUNT(*) as cnt
+      FROM users
+      WHERE status != 'deleted'
+      GROUP BY status
+      ORDER BY status
+    `;
+    const ast = parseSQL(sql);
+    const schema = createNamespace("ns", [USERS_TABLE]);
+    const result = getExtendedLineage(ast as Select, schema);
+
+    // Field lineage
+    expect(result.fields.status?.inputFields).toEqual([
+      { namespace: "ns", name: USERS_TABLE.name, field: "status", transformations: [DIRECT_IDENTITY] },
+    ]);
+
+    // Dataset lineage should have all three subtypes
+    expect(sortDataset(result.dataset)).toEqual(
+      sortDataset([
+        { namespace: "ns", name: USERS_TABLE.name, field: "status", transformations: [INDIRECT_FILTER] },
+        { namespace: "ns", name: USERS_TABLE.name, field: "status", transformations: [INDIRECT_GROUP_BY] },
+        { namespace: "ns", name: USERS_TABLE.name, field: "status", transformations: [INDIRECT_SORT] },
+      ]),
+    );
+  });
+
+  test("column name collision from different tables", () => {
+    const sql = `
+      SELECT u.name as user_name, p.name as product_name
+      FROM users u
+      JOIN products p ON u.favorite_product = p.id
+      WHERE u.name LIKE 'A%' AND p.name LIKE 'Widget%'
+    `;
+    const ast = parseSQL(sql);
+    const schema = createNamespace("ns", [USERS_TABLE, createTable(`${DEFAULT_SCHEMA}.products`, ["id", "name"])]);
+    const result = getExtendedLineage(ast as Select, schema);
+
+    expect(result.fields.user_name?.inputFields).toEqual([
+      { namespace: "ns", name: USERS_TABLE.name, field: "name", transformations: [DIRECT_IDENTITY] },
+    ]);
+    expect(result.fields.product_name?.inputFields).toEqual([
+      { namespace: "ns", name: `${DEFAULT_SCHEMA}.products`, field: "name", transformations: [DIRECT_IDENTITY] },
+    ]);
+
+    const filterLineage = result.dataset?.filter((d) => d.transformations?.[0]?.subtype === "FILTER");
+    expect(sortDataset(filterLineage)).toEqual(
+      sortDataset([
+        { namespace: "ns", name: USERS_TABLE.name, field: "name", transformations: [INDIRECT_FILTER] },
+        { namespace: "ns", name: `${DEFAULT_SCHEMA}.products`, field: "name", transformations: [INDIRECT_FILTER] },
+      ]),
+    );
+  });
+
+  test("deduplication of repeated column in same clause", () => {
+    const sql = `SELECT id FROM users WHERE status = 'active' AND status != 'banned'`;
+    const ast = parseSQL(sql);
+    const schema = createNamespace("ns", [USERS_TABLE]);
+    const result = getExtendedLineage(ast as Select, schema);
+
+    // status appears twice but should be deduplicated
+    expect(result.dataset).toEqual([
+      { namespace: "ns", name: USERS_TABLE.name, field: "status", transformations: [INDIRECT_FILTER] },
+    ]);
+  });
+
+  test("empty dataset lineage when no indirect clauses", () => {
+    const sql = `SELECT id, UPPER(name) as upper_name FROM users`;
+    const ast = parseSQL(sql);
+    const schema = createNamespace("ns", [USERS_TABLE]);
+    const result = getExtendedLineage(ast as Select, schema);
+
+    expect(result.dataset).toEqual([]);
+  });
+});
+
+// =============================================================================
+// SECTION 9: COMPREHENSIVE MEGA-QUERIES
+// =============================================================================
+
+describe("Comprehensive: Everything Together", () => {
+  test("mega query with all features", () => {
+    const sql = `
+      WITH 
+      filtered_sales AS (
+        SELECT 
+          product_id,
+          store_id,
+          quantity,
+          unit_price,
+          quantity * unit_price as line_total
+        FROM sales
+        WHERE sale_date >= '2024-01-01'
+          AND status = 'completed'
+      ),
+      store_totals AS (
+        SELECT 
+          store_id,
+          SUM(line_total) as total_revenue,
+          COUNT(product_id) as product_count,
+          AVG(unit_price) as avg_price
+        FROM filtered_sales
+        GROUP BY store_id
+        HAVING SUM(line_total) > 1000
+      )
+      SELECT 
+        s.name as store_name,
+        s.region,
+        st.total_revenue,
+        st.product_count,
+        st.avg_price,
+        CASE 
+          WHEN st.total_revenue > 100000 THEN 'Premium'
+          WHEN st.total_revenue > 50000 THEN 'Standard'
+          ELSE 'Basic'
+        END as tier,
+        RANK() OVER (PARTITION BY s.region ORDER BY st.total_revenue DESC) as region_rank,
+        MD5(s.name) as store_hash
+      FROM store_totals st
+      JOIN stores s ON st.store_id = s.id
+      WHERE s.active = true
+      ORDER BY s.region, st.total_revenue DESC
+    `;
+    const ast = parseSQL(sql);
+    const schema = createNamespace("ns", [
+      createTable(`${DEFAULT_SCHEMA}.sales`, ["id", "product_id", "store_id", "quantity", "unit_price", "sale_date", "status"]),
+      createTable(`${DEFAULT_SCHEMA}.stores`, ["id", "name", "region", "active"]),
+    ]);
+    const result = getExtendedLineage(ast as Select, schema);
+
+    // ========== FIELD-LEVEL LINEAGE ==========
+
+    // store_name -> stores.name (IDENTITY)
+    expect(result.fields.store_name?.inputFields).toEqual([
+      { namespace: "ns", name: `${DEFAULT_SCHEMA}.stores`, field: "name", transformations: [DIRECT_IDENTITY] },
+    ]);
+
+    // region -> stores.region (IDENTITY)
+    expect(result.fields.region?.inputFields).toEqual([
+      { namespace: "ns", name: `${DEFAULT_SCHEMA}.stores`, field: "region", transformations: [DIRECT_IDENTITY] },
+    ]);
+
+    // total_revenue -> SUM(quantity * unit_price) via CTEs (AGGREGATION)
+    expect(sortInputFields({ total_revenue: result.fields.total_revenue! })).toEqual(
+      sortInputFields({
+        total_revenue: {
+          inputFields: [
+            { namespace: "ns", name: `${DEFAULT_SCHEMA}.sales`, field: "quantity", transformations: [DIRECT_AGGREGATION] },
+            { namespace: "ns", name: `${DEFAULT_SCHEMA}.sales`, field: "unit_price", transformations: [DIRECT_AGGREGATION] },
+          ],
+        },
+      }),
+    );
+
+    // product_count -> COUNT(product_id) (AGGREGATION with masking)
+    expect(result.fields.product_count?.inputFields).toEqual([
+      {
+        namespace: "ns",
+        name: `${DEFAULT_SCHEMA}.sales`,
+        field: "product_id",
+        transformations: [{ type: "DIRECT", subtype: "AGGREGATION", masking: true }],
+      },
+    ]);
+
+    // avg_price -> AVG(unit_price) (AGGREGATION)
+    expect(result.fields.avg_price?.inputFields).toEqual([
+      { namespace: "ns", name: `${DEFAULT_SCHEMA}.sales`, field: "unit_price", transformations: [DIRECT_AGGREGATION] },
+    ]);
+
+    // tier -> CASE on total_revenue which traces to quantity and unit_price
+    const tierFields = result.fields.tier?.inputFields.map((f) => f.field);
+    expect(tierFields).toContain("quantity");
+    expect(tierFields).toContain("unit_price");
+
+    // region_rank -> RANK() OVER (...) tracks columns from PARTITION BY and ORDER BY
+    const rankFields = result.fields.region_rank?.inputFields;
+    expect(rankFields?.map((f) => f.field)).toContain("region");
+
+    // store_hash -> MD5(name) (TRANSFORMATION with masking)
+    expect(result.fields.store_hash?.inputFields).toEqual([
+      {
+        namespace: "ns",
+        name: `${DEFAULT_SCHEMA}.stores`,
+        field: "name",
+        transformations: [{ type: "DIRECT", subtype: "TRANSFORMATION", masking: true }],
+      },
+    ]);
+
+    // ========== DATASET-LEVEL LINEAGE ==========
+
+    // FILTER from filtered_sales CTE (WHERE sale_date >= ... AND status = ...)
+    const filterLineage = result.dataset?.filter((d) => d.transformations?.[0]?.subtype === "FILTER");
     expect(filterLineage).toContainEqual({
-      namespace: "postgres",
-      name: "users",
+      namespace: "ns",
+      name: `${DEFAULT_SCHEMA}.sales`,
+      field: "sale_date",
+      transformations: [INDIRECT_FILTER],
+    });
+    expect(filterLineage).toContainEqual({
+      namespace: "ns",
+      name: `${DEFAULT_SCHEMA}.sales`,
+      field: "status",
+      transformations: [INDIRECT_FILTER],
+    });
+    expect(filterLineage).toContainEqual({
+      namespace: "ns",
+      name: `${DEFAULT_SCHEMA}.stores`,
+      field: "active",
+      transformations: [INDIRECT_FILTER],
+    });
+
+    // JOIN lineage from st.store_id = s.id
+    const joinLineage = result.dataset?.filter((d) => d.transformations?.[0]?.subtype === "JOIN");
+    expect(joinLineage).toContainEqual({
+      namespace: "ns",
+      name: `${DEFAULT_SCHEMA}.stores`,
+      field: "id",
+      transformations: [INDIRECT_JOIN],
+    });
+
+    // SORT lineage from ORDER BY s.region, st.total_revenue
+    const sortLineage = result.dataset?.filter((d) => d.transformations?.[0]?.subtype === "SORT");
+    expect(sortLineage).toContainEqual({
+      namespace: "ns",
+      name: `${DEFAULT_SCHEMA}.stores`,
+      field: "region",
+      transformations: [INDIRECT_SORT],
+    });
+
+    // WINDOW lineage from PARTITION BY s.region ORDER BY st.total_revenue
+    const windowLineage = result.dataset?.filter((d) => d.transformations?.[0]?.subtype === "WINDOW");
+    expect(windowLineage).toContainEqual({
+      namespace: "ns",
+      name: `${DEFAULT_SCHEMA}.stores`,
+      field: "region",
+      transformations: [INDIRECT_WINDOW],
+    });
+
+    // Verify we have all 8 output fields
+    expect(Object.keys(result.fields).length).toBe(8);
+  });
+
+  test("e-commerce analytics mega query", () => {
+    const sql = `
+      SELECT 
+        c.name as category_name,
+        p.name as product_name,
+        SUM(oi.quantity) as total_qty,
+        SUM(oi.quantity * oi.price) as revenue,
+        AVG(oi.price) as avg_price,
+        COUNT(DISTINCT o.customer_id) as unique_customers,
+        ROW_NUMBER() OVER (PARTITION BY c.id ORDER BY SUM(oi.quantity * oi.price) DESC) as category_rank
+      FROM categories c
+      JOIN products p ON c.id = p.category_id
+      JOIN order_items oi ON p.id = oi.product_id
+      JOIN orders o ON oi.order_id = o.id
+      WHERE o.status = 'completed' 
+        AND o.created_at >= '2024-01-01'
+        AND p.active = true
+      GROUP BY c.id, c.name, p.id, p.name
+      HAVING SUM(oi.quantity) > 10
+      ORDER BY c.name, revenue DESC
+    `;
+    const ast = parseSQL(sql);
+    const schema = createNamespace("ns", [
+      createTable(`${DEFAULT_SCHEMA}.categories`, ["id", "name"]),
+      createTable(`${DEFAULT_SCHEMA}.products`, ["id", "name", "category_id", "active"]),
+      createTable(`${DEFAULT_SCHEMA}.order_items`, ["id", "order_id", "product_id", "quantity", "price"]),
+      createTable(`${DEFAULT_SCHEMA}.orders`, ["id", "customer_id", "status", "created_at"]),
+    ]);
+    const result = getExtendedLineage(ast as Select, schema);
+
+    // ========== FIELD-LEVEL LINEAGE ==========
+
+    expect(result.fields.category_name?.inputFields).toEqual([
+      { namespace: "ns", name: `${DEFAULT_SCHEMA}.categories`, field: "name", transformations: [DIRECT_IDENTITY] },
+    ]);
+
+    expect(result.fields.product_name?.inputFields).toEqual([
+      { namespace: "ns", name: `${DEFAULT_SCHEMA}.products`, field: "name", transformations: [DIRECT_IDENTITY] },
+    ]);
+
+    expect(result.fields.total_qty?.inputFields).toEqual([
+      { namespace: "ns", name: `${DEFAULT_SCHEMA}.order_items`, field: "quantity", transformations: [DIRECT_AGGREGATION] },
+    ]);
+
+    expect(sortInputFields({ revenue: result.fields.revenue! })).toEqual(
+      sortInputFields({
+        revenue: {
+          inputFields: [
+            { namespace: "ns", name: `${DEFAULT_SCHEMA}.order_items`, field: "price", transformations: [DIRECT_AGGREGATION] },
+            { namespace: "ns", name: `${DEFAULT_SCHEMA}.order_items`, field: "quantity", transformations: [DIRECT_AGGREGATION] },
+          ],
+        },
+      }),
+    );
+
+    expect(result.fields.avg_price?.inputFields).toEqual([
+      { namespace: "ns", name: `${DEFAULT_SCHEMA}.order_items`, field: "price", transformations: [DIRECT_AGGREGATION] },
+    ]);
+
+    expect(result.fields.unique_customers?.inputFields).toEqual([
+      {
+        namespace: "ns",
+        name: `${DEFAULT_SCHEMA}.orders`,
+        field: "customer_id",
+        transformations: [{ type: "DIRECT", subtype: "AGGREGATION", masking: true }],
+      },
+    ]);
+
+    // ========== DATASET-LEVEL LINEAGE ==========
+
+    // JOIN lineage - 3 joins with 2 columns each = 6 total
+    const joinLineage = result.dataset?.filter((d) => d.transformations?.[0]?.subtype === "JOIN");
+    expect(joinLineage?.length).toBe(6);
+    expect(joinLineage).toContainEqual({
+      namespace: "ns",
+      name: `${DEFAULT_SCHEMA}.categories`,
+      field: "id",
+      transformations: [INDIRECT_JOIN],
+    });
+    expect(joinLineage).toContainEqual({
+      namespace: "ns",
+      name: `${DEFAULT_SCHEMA}.products`,
+      field: "category_id",
+      transformations: [INDIRECT_JOIN],
+    });
+    expect(joinLineage).toContainEqual({
+      namespace: "ns",
+      name: `${DEFAULT_SCHEMA}.products`,
+      field: "id",
+      transformations: [INDIRECT_JOIN],
+    });
+    expect(joinLineage).toContainEqual({
+      namespace: "ns",
+      name: `${DEFAULT_SCHEMA}.order_items`,
+      field: "product_id",
+      transformations: [INDIRECT_JOIN],
+    });
+    expect(joinLineage).toContainEqual({
+      namespace: "ns",
+      name: `${DEFAULT_SCHEMA}.order_items`,
+      field: "order_id",
+      transformations: [INDIRECT_JOIN],
+    });
+    expect(joinLineage).toContainEqual({
+      namespace: "ns",
+      name: `${DEFAULT_SCHEMA}.orders`,
+      field: "id",
+      transformations: [INDIRECT_JOIN],
+    });
+
+    // FILTER lineage - status, created_at, active + HAVING quantity
+    const filterLineage = result.dataset?.filter((d) => d.transformations?.[0]?.subtype === "FILTER");
+    expect(filterLineage).toContainEqual({
+      namespace: "ns",
+      name: `${DEFAULT_SCHEMA}.orders`,
+      field: "status",
+      transformations: [INDIRECT_FILTER],
+    });
+    expect(filterLineage).toContainEqual({
+      namespace: "ns",
+      name: `${DEFAULT_SCHEMA}.orders`,
+      field: "created_at",
+      transformations: [INDIRECT_FILTER],
+    });
+    expect(filterLineage).toContainEqual({
+      namespace: "ns",
+      name: `${DEFAULT_SCHEMA}.products`,
+      field: "active",
+      transformations: [INDIRECT_FILTER],
+    });
+    expect(filterLineage).toContainEqual({
+      namespace: "ns",
+      name: `${DEFAULT_SCHEMA}.order_items`,
+      field: "quantity",
+      transformations: [INDIRECT_FILTER],
+    });
+
+    // GROUP BY lineage - c.id, c.name, p.id, p.name
+    const groupByLineage = result.dataset?.filter((d) => d.transformations?.[0]?.subtype === "GROUP_BY");
+    expect(groupByLineage?.length).toBe(4);
+    expect(groupByLineage).toContainEqual({
+      namespace: "ns",
+      name: `${DEFAULT_SCHEMA}.categories`,
+      field: "id",
+      transformations: [INDIRECT_GROUP_BY],
+    });
+    expect(groupByLineage).toContainEqual({
+      namespace: "ns",
+      name: `${DEFAULT_SCHEMA}.categories`,
+      field: "name",
+      transformations: [INDIRECT_GROUP_BY],
+    });
+    expect(groupByLineage).toContainEqual({
+      namespace: "ns",
+      name: `${DEFAULT_SCHEMA}.products`,
+      field: "id",
+      transformations: [INDIRECT_GROUP_BY],
+    });
+    expect(groupByLineage).toContainEqual({
+      namespace: "ns",
+      name: `${DEFAULT_SCHEMA}.products`,
+      field: "name",
+      transformations: [INDIRECT_GROUP_BY],
+    });
+
+    // SORT lineage - c.name
+    const sortLineage = result.dataset?.filter((d) => d.transformations?.[0]?.subtype === "SORT");
+    expect(sortLineage).toContainEqual({
+      namespace: "ns",
+      name: `${DEFAULT_SCHEMA}.categories`,
+      field: "name",
+      transformations: [INDIRECT_SORT],
+    });
+
+    // WINDOW lineage - PARTITION BY c.id
+    const windowLineage = result.dataset?.filter((d) => d.transformations?.[0]?.subtype === "WINDOW");
+    expect(windowLineage).toContainEqual({
+      namespace: "ns",
+      name: `${DEFAULT_SCHEMA}.categories`,
+      field: "id",
+      transformations: [INDIRECT_WINDOW],
+    });
+
+    // Verify 7 output fields
+    expect(Object.keys(result.fields).length).toBe(7);
+  });
+
+  test("HR analytics mega query with complex CTEs and CASE", () => {
+    const sql = `
+      WITH 
+      active_employees AS (
+        SELECT 
+          id,
+          department_id,
+          salary,
+          hire_date,
+          performance_score
+        FROM employees
+        WHERE status = 'active' AND terminated_at IS NULL
+      ),
+      dept_stats AS (
+        SELECT 
+          department_id,
+          COUNT(id) as headcount,
+          SUM(salary) as total_compensation,
+          AVG(salary) as avg_salary,
+          MIN(hire_date) as oldest_hire,
+          AVG(performance_score) as avg_performance
+        FROM active_employees
+        GROUP BY department_id
+        HAVING COUNT(id) >= 3
+      )
+      SELECT 
+        d.name as department_name,
+        d.location,
+        ds.headcount,
+        ds.total_compensation,
+        ds.avg_salary,
+        ds.avg_performance,
+        CASE 
+          WHEN ds.avg_performance >= 4.5 THEN 'Exceptional'
+          WHEN ds.avg_performance >= 3.5 THEN 'Good'
+          WHEN ds.avg_performance >= 2.5 THEN 'Average'
+          ELSE 'Needs Improvement'
+        END as performance_tier,
+        DENSE_RANK() OVER (ORDER BY ds.total_compensation DESC) as compensation_rank,
+        ROW_NUMBER() OVER (PARTITION BY d.location ORDER BY ds.headcount DESC) as location_rank,
+        SHA256(d.name) as dept_hash
+      FROM dept_stats ds
+      JOIN departments d ON ds.department_id = d.id
+      WHERE d.active = true
+      ORDER BY d.location, ds.total_compensation DESC
+    `;
+    const ast = parseSQL(sql);
+    const schema = createNamespace("ns", [
+      createTable(`${DEFAULT_SCHEMA}.employees`, [
+        "id",
+        "department_id",
+        "salary",
+        "hire_date",
+        "performance_score",
+        "status",
+        "terminated_at",
+      ]),
+      createTable(`${DEFAULT_SCHEMA}.departments`, ["id", "name", "location", "active"]),
+    ]);
+    const result = getExtendedLineage(ast as Select, schema);
+
+    // ========== FIELD-LEVEL LINEAGE ==========
+
+    expect(result.fields.department_name?.inputFields).toEqual([
+      { namespace: "ns", name: `${DEFAULT_SCHEMA}.departments`, field: "name", transformations: [DIRECT_IDENTITY] },
+    ]);
+
+    expect(result.fields.location?.inputFields).toEqual([
+      { namespace: "ns", name: `${DEFAULT_SCHEMA}.departments`, field: "location", transformations: [DIRECT_IDENTITY] },
+    ]);
+
+    expect(result.fields.headcount?.inputFields).toEqual([
+      {
+        namespace: "ns",
+        name: `${DEFAULT_SCHEMA}.employees`,
+        field: "id",
+        transformations: [{ type: "DIRECT", subtype: "AGGREGATION", masking: true }],
+      },
+    ]);
+
+    expect(result.fields.total_compensation?.inputFields).toEqual([
+      { namespace: "ns", name: `${DEFAULT_SCHEMA}.employees`, field: "salary", transformations: [DIRECT_AGGREGATION] },
+    ]);
+
+    expect(result.fields.avg_salary?.inputFields).toEqual([
+      { namespace: "ns", name: `${DEFAULT_SCHEMA}.employees`, field: "salary", transformations: [DIRECT_AGGREGATION] },
+    ]);
+
+    expect(result.fields.avg_performance?.inputFields).toEqual([
+      { namespace: "ns", name: `${DEFAULT_SCHEMA}.employees`, field: "performance_score", transformations: [DIRECT_AGGREGATION] },
+    ]);
+
+    // performance_tier CASE uses avg_performance -> performance_score
+    const tierFields = result.fields.performance_tier?.inputFields;
+    expect(tierFields?.map((f) => f.field)).toContain("performance_score");
+
+    // dept_hash uses MD5 -> masking
+    expect(result.fields.dept_hash?.inputFields).toEqual([
+      {
+        namespace: "ns",
+        name: `${DEFAULT_SCHEMA}.departments`,
+        field: "name",
+        transformations: [{ type: "DIRECT", subtype: "TRANSFORMATION", masking: true }],
+      },
+    ]);
+
+    // ========== DATASET-LEVEL LINEAGE ==========
+
+    // FILTER from active_employees CTE
+    const filterLineage = result.dataset?.filter((d) => d.transformations?.[0]?.subtype === "FILTER");
+    expect(filterLineage).toContainEqual({
+      namespace: "ns",
+      name: `${DEFAULT_SCHEMA}.employees`,
+      field: "status",
+      transformations: [INDIRECT_FILTER],
+    });
+    expect(filterLineage).toContainEqual({
+      namespace: "ns",
+      name: `${DEFAULT_SCHEMA}.employees`,
+      field: "terminated_at",
+      transformations: [INDIRECT_FILTER],
+    });
+    expect(filterLineage).toContainEqual({
+      namespace: "ns",
+      name: `${DEFAULT_SCHEMA}.departments`,
+      field: "active",
+      transformations: [INDIRECT_FILTER],
+    });
+
+    // JOIN
+    const joinLineage = result.dataset?.filter((d) => d.transformations?.[0]?.subtype === "JOIN");
+    expect(joinLineage).toContainEqual({
+      namespace: "ns",
+      name: `${DEFAULT_SCHEMA}.departments`,
+      field: "id",
+      transformations: [INDIRECT_JOIN],
+    });
+
+    // SORT
+    const sortLineage = result.dataset?.filter((d) => d.transformations?.[0]?.subtype === "SORT");
+    expect(sortLineage).toContainEqual({
+      namespace: "ns",
+      name: `${DEFAULT_SCHEMA}.departments`,
+      field: "location",
+      transformations: [INDIRECT_SORT],
+    });
+
+    // WINDOW
+    const windowLineage = result.dataset?.filter((d) => d.transformations?.[0]?.subtype === "WINDOW");
+    expect(windowLineage).toContainEqual({
+      namespace: "ns",
+      name: `${DEFAULT_SCHEMA}.departments`,
+      field: "location",
+      transformations: [INDIRECT_WINDOW],
+    });
+
+    // Verify 10 output fields
+    expect(Object.keys(result.fields).length).toBe(10);
+  });
+
+  test("UNION with CTEs and window functions mega query", () => {
+    const sql = `
+      WITH 
+      us_sales AS (
+        SELECT 
+          product_id,
+          SUM(amount) as total_amount,
+          COUNT(*) as sale_count
+        FROM sales
+        WHERE region = 'US' AND sale_date >= '2024-01-01'
+        GROUP BY product_id
+      ),
+      eu_sales AS (
+        SELECT 
+          product_id,
+          SUM(amount) as total_amount,
+          COUNT(*) as sale_count
+        FROM sales
+        WHERE region = 'EU' AND sale_date >= '2024-01-01'
+        GROUP BY product_id
+      )
+      SELECT 
+        'US' as region,
+        p.name as product_name,
+        us.total_amount,
+        us.sale_count,
+        RANK() OVER (ORDER BY us.total_amount DESC) as revenue_rank
+      FROM us_sales us
+      JOIN products p ON us.product_id = p.id
+      WHERE p.active = true
+      
+      UNION ALL
+      
+      SELECT 
+        'EU' as region,
+        p.name as product_name,
+        eu.total_amount,
+        eu.sale_count,
+        RANK() OVER (ORDER BY eu.total_amount DESC) as revenue_rank
+      FROM eu_sales eu
+      JOIN products p ON eu.product_id = p.id
+      WHERE p.active = true
+    `;
+    const ast = parseSQL(sql, "postgresql");
+    const schema = createNamespace("ns", [
+      createTable(`${DEFAULT_SCHEMA}.sales`, ["id", "product_id", "amount", "region", "sale_date"]),
+      createTable(`${DEFAULT_SCHEMA}.products`, ["id", "name", "active"]),
+    ]);
+    const result = getExtendedLineage(ast as Select, schema);
+
+    // Field lineage - product_name comes from products.name
+    // Both UNION parts join the same products table, so we get one unique entry per field
+    // (the mergeInputFields deduplicates by full field identity including transformations)
+    expect(result.fields.product_name?.inputFields).toContainEqual({
+      namespace: "ns",
+      name: `${DEFAULT_SCHEMA}.products`,
+      field: "name",
+      transformations: [DIRECT_IDENTITY],
+    });
+
+    // total_amount traces through CTEs to sales.amount (AGGREGATION)
+    expect(result.fields.total_amount?.inputFields).toContainEqual({
+      namespace: "ns",
+      name: `${DEFAULT_SCHEMA}.sales`,
+      field: "amount",
+      transformations: [DIRECT_AGGREGATION],
+    });
+
+    // Dataset lineage from both CTEs and both UNION parts
+    const filterLineage = result.dataset?.filter((d) => d.transformations?.[0]?.subtype === "FILTER");
+
+    // Both CTEs have WHERE region = '...' AND sale_date >= '...'
+    // Plus both outer queries have WHERE p.active = true
+    // Check for key filters
+    expect(filterLineage).toContainEqual({
+      namespace: "ns",
+      name: `${DEFAULT_SCHEMA}.sales`,
       field: "region",
       transformations: [INDIRECT_FILTER],
     });
     expect(filterLineage).toContainEqual({
-      namespace: "postgres",
-      name: "customers",
-      field: "region",
+      namespace: "ns",
+      name: `${DEFAULT_SCHEMA}.sales`,
+      field: "sale_date",
       transformations: [INDIRECT_FILTER],
     });
     expect(filterLineage).toContainEqual({
-      namespace: "postgres",
-      name: "vendors",
-      field: "region",
+      namespace: "ns",
+      name: `${DEFAULT_SCHEMA}.products`,
+      field: "active",
       transformations: [INDIRECT_FILTER],
+    });
+
+    // GROUP BY from both CTEs (deduplicated since same table.field)
+    const groupByLineage = result.dataset?.filter((d) => d.transformations?.[0]?.subtype === "GROUP_BY");
+    expect(groupByLineage).toContainEqual({
+      namespace: "ns",
+      name: `${DEFAULT_SCHEMA}.sales`,
+      field: "product_id",
+      transformations: [INDIRECT_GROUP_BY],
+    });
+
+    // JOIN from both UNION parts
+    const joinLineage = result.dataset?.filter((d) => d.transformations?.[0]?.subtype === "JOIN");
+    expect(joinLineage).toContainEqual({
+      namespace: "ns",
+      name: `${DEFAULT_SCHEMA}.products`,
+      field: "id",
+      transformations: [INDIRECT_JOIN],
+    });
+
+    // Verify 5 output fields
+    expect(Object.keys(result.fields).length).toBe(5);
+  });
+});
+
+// =============================================================================
+// SECTION 10: DEFAULT SCHEMA HANDLING
+// =============================================================================
+
+describe("Default Schema Handling", () => {
+  test("matches table with default schema", () => {
+    const sql = `SELECT id, name FROM users`;
+    const ast = parseSQL(sql);
+    const schema = createNamespace("ns", [USERS_TABLE], "public");
+    const result = getExtendedLineage(ast as Select, schema);
+
+    expect(result.fields).toEqual({
+      id: {
+        inputFields: [{ namespace: "ns", name: USERS_TABLE.name, field: "id", transformations: [DIRECT_IDENTITY] }],
+      },
+      name: {
+        inputFields: [{ namespace: "ns", name: USERS_TABLE.name, field: "name", transformations: [DIRECT_IDENTITY] }],
+      },
     });
   });
 
-  test("UNION with JOINs captures dataset lineage from both parts", () => {
-    const sql = `
-      SELECT u.id, u.name 
-      FROM users u 
-      JOIN orders o ON u.id = o.user_id
-      UNION
-      SELECT c.id, c.name 
-      FROM customers c 
-      JOIN purchases p ON c.id = p.customer_id
-    `;
-    const ast = parseSQLPostgres(sql);
-    const schema = createNamespace("postgres", [
-      createTable("users", ["id", "name"]),
-      createTable("orders", ["id", "user_id"]),
-      createTable("customers", ["id", "name"]),
-      createTable("purchases", ["id", "customer_id"]),
-    ]);
-
+  test("schema-qualified table name", () => {
+    const sql = `SELECT u.id FROM analytics.users u WHERE u.status = 'active'`;
+    const ast = parseSQL(sql);
+    const schema = createNamespace("ns", [createTable("analytics.users", ["id", "status"])]);
     const result = getExtendedLineage(ast as Select, schema);
 
-    // Dataset lineage should include JOIN conditions from both queries
-    const joinLineage = findBySubtype(result.dataset, "JOIN");
-    // Each JOIN contributes 2 fields (from ON condition)
-    expect(joinLineage.length).toBeGreaterThanOrEqual(4);
+    expect(result.fields.id?.inputFields).toEqual([
+      { namespace: "ns", name: "analytics.users", field: "id", transformations: [DIRECT_IDENTITY] },
+    ]);
+    expect(result.dataset).toEqual([
+      { namespace: "ns", name: "analytics.users", field: "status", transformations: [INDIRECT_FILTER] },
+    ]);
   });
 });

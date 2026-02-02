@@ -1,7 +1,3 @@
-// ============================================================================
-// Imports
-// ============================================================================
-
 import {
   type ColumnLineageDatasetFacet,
   type InputField,
@@ -23,10 +19,6 @@ import {
 } from "node-sql-parser";
 import { HashSet } from "./hashset";
 
-// ============================================================================
-// Types
-// ============================================================================
-
 type Transformation = Exclude<_Transformation, "masking"> & {
   masking: boolean; // output boolean only for easier testing
 };
@@ -47,10 +39,6 @@ const MASKING_FUNCTIONS = new Set([
   "MASK",
   "REDACT",
 ]);
-
-// ============================================================================
-// Transformation Constants
-// ============================================================================
 
 // Direct transformation constants
 export const DIRECT_TRANSFORMATION: Transformation = {
@@ -153,10 +141,6 @@ class TransformationSet extends HashSet<Transformation> {
   }
 }
 
-// ============================================================================
-// Exported Types
-// ============================================================================
-
 export type Column = {
   name: string;
 };
@@ -194,11 +178,7 @@ export type SetOperation = "union" | "union all" | "intersect" | "intersect all"
 /**
  * Extended lineage result that includes both field-level and dataset-level lineage
  */
-export type ExtendedLineageResult = Pick<ColumnLineageDatasetFacet, "fields" | "dataset">
-
-// ============================================================================
-// Column Name Utilities
-// ============================================================================
+export type ExtendedLineageResult = Pick<ColumnLineageDatasetFacet, "fields" | "dataset">;
 
 function isColumn(selectColumn: Select["columns"][number]): selectColumn is AstColumn {
   return (
@@ -430,10 +410,6 @@ function extractWindowExpressionsFromOver(over: OverClause): ExpressionValue[] {
   return expressions;
 }
 
-// ============================================================================
-// Direct Transformation Extraction
-// ============================================================================
-
 /**
  * Get transformations from expression, supporting CASE/IF for CONDITION subtype
  */
@@ -525,6 +501,7 @@ function getDirectTransformationsFromExprValue(
             arg,
             mergeTransformations(parentTransformation, {
               ...DIRECT_TRANSFORMATION,
+              // TODO - copilot edits
               masking:
                 funcExpr.name.name.length > 0 && MASKING_FUNCTIONS.has(funcExpr.name.name.at(-1)!.value.toUpperCase()),
             }),
@@ -632,10 +609,6 @@ function getIndirectTransformationsFromExpr(
   return result;
 }
 
-// ============================================================================
-// Indirect Lineage Extraction Helpers
-// ============================================================================
-
 /**
  * Resolves a column reference to an InputField by finding the matching table in namespace.
  * This is the core helper that eliminates repetitive table lookup logic.
@@ -711,10 +684,6 @@ function extractInputFieldsFromExpressions(
     extractInputFieldsFromExpression(expr, regularTables, namespace, transformation),
   );
 }
-
-// ============================================================================
-// Clause-Specific Lineage Extractors
-// ============================================================================
 
 /**
  * Extract JOIN lineage from FROM clause (ON and USING conditions)
@@ -917,10 +886,6 @@ function getHavingLineage(select: Select, namespace: Namespace): InputField[] {
   );
 }
 
-// ============================================================================
-// Table Expression Helpers
-// ============================================================================
-
 function getTableExpressionsFromSelect(select: Select): {
   regularTables: BaseFrom[];
   selectTables: SelectWithAlias[];
@@ -1070,10 +1035,6 @@ function expandStarColumn(column: AstColumn, select: Select, namespace: Namespac
 
   return expandedColumns;
 }
-
-// ============================================================================
-// Set Operation Helpers
-// ============================================================================
 
 /**
  * Check if a SELECT has set operations (UNION, INTERSECT, EXCEPT)
@@ -1257,12 +1218,7 @@ function getLineageForSingleSelect(select: Select, namespace: Namespace): Column
           if (!outputFieldName) {
             outputFieldName = `unknown_${unknownCount++}`;
           }
-          acc = {
-            ...acc,
-            [outputFieldName]: {
-              inputFields: getColumnLineage(select, namespace, expandedCol),
-            },
-          };
+          acc[outputFieldName] = { inputFields: getColumnLineage(select, namespace, expandedCol) };
         });
 
         return acc;
@@ -1274,12 +1230,8 @@ function getLineageForSingleSelect(select: Select, namespace: Namespace): Column
         outputFieldName = `unknown_${unknownCount++}`;
       }
 
-      return {
-        ...acc,
-        [outputFieldName]: {
-          inputFields: getColumnLineage(select, namespace, column),
-        },
-      };
+      acc[outputFieldName] = { inputFields: getColumnLineage(select, namespace, column) };
+      return acc;
     },
     {} as ColumnLineageDatasetFacet["fields"],
   );
@@ -1289,16 +1241,15 @@ function getLineageForSingleSelect(select: Select, namespace: Namespace): Column
  * Merge input fields from multiple sources, deduplicating by field identity
  */
 function mergeInputFields(existing: InputField[], incoming: InputField[]): InputField[] {
-  const hasher = (value: InputField) => {
+  const hashset = new HashSet((value: InputField) => {
     const transformationsString =
       value.transformations?.map((t) => transformationHasher(t as Transformation)).join("-") ?? "";
     return `${value.namespace}-${value.name}-${value.field}-${transformationsString}`;
-  };
-  const mergedMap = new Map(existing.map((field) => [hasher(field), field] as const, {}));
+  });
+  existing.forEach((field) => hashset.add(field));
+  incoming.forEach((field) => hashset.add(field));
 
-  incoming.forEach((field) => mergedMap.set(hasher(field), field));
-
-  return [...mergedMap.values()];
+  return [...hashset.values()];
 }
 
 /**

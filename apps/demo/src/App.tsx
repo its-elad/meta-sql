@@ -47,6 +47,8 @@ export default function App() {
     setLineageData(lineageResult);
   }, []);
 
+  useEffect(() => console.log(lineageData), [lineageData]);
+
   return (
     <div className="min-h-screen bg-background font-[DM Sans]">
       {/* Header */}
@@ -94,7 +96,7 @@ export default function App() {
           <CardContent className="absolute inset-0 p-0">
             <LineageGraph lineageData={lineageData?.fields || {}} schema={schema} className="h-full w-full" />
           </CardContent>
-          <CardHeader className="relative z-  10 bg-transparent">
+          <CardHeader className="relative z-10 bg-transparent">
             <CardTitle>Data Lineage Graph</CardTitle>
           </CardHeader>
         </Card>

@@ -16,6 +16,9 @@ import {
   Case,
   Interval,
   Cast,
+  type AsWindowSpec,
+  NamedWindowExpr,
+  ExprList,
 } from "node-sql-parser";
 import { HashSet } from "./hashset";
 
@@ -190,16 +193,6 @@ export type SelectWithAlias = Select & {
   as?: string | null;
 };
 
-/**
- * Set operation type for UNION, INTERSECT, EXCEPT
- */
-export type SetOperation = "union" | "union all" | "intersect" | "intersect all" | "except" | "except all";
-
-/**
- * Extended lineage result that includes both field-level and dataset-level lineage
- */
-export type ExtendedLineageResult = Pick<ColumnLineageDatasetFacet, "fields" | "dataset">;
-
 function isColumn(selectColumn: Select["columns"][number]): selectColumn is AstColumn {
   return (
     typeof selectColumn === "object" &&
@@ -356,9 +349,7 @@ export function extractColumnRefs(expr: ExpressionValue | null | undefined): Col
     case "function": {
       const func = expr as AstFunction;
       if (func.args?.value) {
-        for (const arg of func.args.value) {
-          refs.push(...extractColumnRefs(arg));
-        }
+        refs.push(...extractColumnRefs(func.args));
       }
       break;
     }
@@ -394,16 +385,18 @@ export function extractColumnRefs(expr: ExpressionValue | null | undefined): Col
       break;
     }
 
-    default:
-      // Handle nested expressions in unknown types
-      if (typeof expr === "object" && expr !== null) {
-        for (const key of Object.keys(expr)) {
-          const value = (expr as Record<string, unknown>)[key];
-          if (value && typeof value === "object" && "type" in value) {
-            refs.push(...extractColumnRefs(value as ExpressionValue));
-          }
+    case "expr_list": {
+      const cast = expr as ExprList;
+      if (cast.value) {
+        for (const subExpr of cast.value) {
+          refs.push(...extractColumnRefs(subExpr));
         }
       }
+      break;
+    }
+
+    default:
+      console.warn("UNHANDLED EXPR TYPE IN EXTRACT COLUMN REFS:", expr.type, expr);
       break;
   }
 
@@ -411,47 +404,36 @@ export function extractColumnRefs(expr: ExpressionValue | null | undefined): Col
 }
 
 /**
- * Type for OVER clause structure (shared between aggr_func and function types)
+ * Type for OVER clause in window functions.
+ * Uses the library's AsWindowSpec type which matches the actual parser output.
  */
-type OverClause = {
-  // Direct structure (legacy/simple case)
-  partitionby?: ExpressionValue[];
-  orderby?: Array<{ expr: ExpressionValue }>;
-  // Nested structure (Trino parser output)
-  as_window_specification?: {
-    window_specification?: {
-      partitionby?: Array<{ expr: ExpressionValue }>;
-      orderby?: Array<{ expr: ExpressionValue }>;
-    };
-  };
+type OverClause = NamedWindowExpr & {
+  type: "window";
+  as_window_specification: AsWindowSpec;
 };
 
 /**
  * Extracts PARTITION BY and ORDER BY expressions from an OVER clause.
- * Handles both direct structure and nested Trino parser output structure.
  * @returns Array of expressions from PARTITION BY and ORDER BY clauses
  */
 function extractWindowExpressionsFromOver(over: OverClause): ExpressionValue[] {
   const expressions: ExpressionValue[] = [];
 
-  // Handle nested structure (Trino parser output)
-  const windowSpec = over.as_window_specification?.window_specification;
+  // Handle string reference (named window)
+  if (typeof over.as_window_specification === "string") {
+    // Named window reference - no direct expressions to extract
+    return expressions;
+  }
+
+  const windowSpec = over.as_window_specification.window_specification;
   if (windowSpec) {
     if (windowSpec.partitionby) {
-      expressions.push(...windowSpec.partitionby.map((item) => item.expr));
+      expressions.push(
+        ...windowSpec.partitionby.flatMap((item) => (Array.isArray(item.expr) ? item.expr : [item.expr])),
+      );
     }
     if (windowSpec.orderby) {
       expressions.push(...windowSpec.orderby.map((item) => item.expr));
-    }
-  }
-
-  // Handle direct structure (legacy/simple case) as fallback
-  if (expressions.length === 0) {
-    if (over.partitionby) {
-      expressions.push(...over.partitionby);
-    }
-    if (over.orderby) {
-      expressions.push(...over.orderby.map((item) => item.expr));
     }
   }
 
@@ -477,7 +459,7 @@ function extractWindowExpressionsFromOver(over: OverClause): ExpressionValue[] {
  * @calls formatInputColumnName - To format column references as keys
  * @calls mergeTransformations - To combine parent and child transformations
  * @calls extractWindowExpressionsFromOver - For window function OVER clauses
- * @calls extractTransformationsWithType - For CASE condition columns
+ * @calls extractColumnsWithUniformTransformation - For CASE condition columns
  * @calls extractTransformationsFromExpr - Recursively for nested expressions
  */
 function extractTransformationsFromExpr(
@@ -542,7 +524,7 @@ function extractTransformationsFromExpr(
 
       // For window functions (aggr_func with OVER clause), also extract columns from PARTITION BY/ORDER BY
       if ("over" in aggExpr && aggExpr.over) {
-        const windowExprs = extractWindowExpressionsFromOver(aggExpr.over);
+        const windowExprs = extractWindowExpressionsFromOver(aggExpr.over as OverClause);
         for (const windowExpr of windowExprs) {
           const windowTransformations = extractTransformationsFromExpr(
             windowExpr,
@@ -581,7 +563,7 @@ function extractTransformationsFromExpr(
       // For window functions (function with OVER clause like RANK(), ROW_NUMBER()),
       // extract columns from PARTITION BY/ORDER BY since these functions have no arguments
       if ("over" in funcExpr && funcExpr.over) {
-        const windowExprs = extractWindowExpressionsFromOver((funcExpr as AstFunction & { over: OverClause }).over);
+        const windowExprs = extractWindowExpressionsFromOver(funcExpr.over as OverClause);
         for (const windowExpr of windowExprs) {
           const windowTransformations = extractTransformationsFromExpr(
             windowExpr,
@@ -603,8 +585,8 @@ function extractTransformationsFromExpr(
       if (caseExpr.args) {
         for (const arg of caseExpr.args) {
           // Condition columns get INDIRECT/CONDITION (per-column indirect transformation)
-          if (arg.type === "when" && arg.cond) {
-            const condTransformations = extractTransformationsWithType(arg.cond, INDIRECT_CONDITION);
+          if (arg.type === "when") {
+            const condTransformations = extractColumnsWithUniformTransformation(arg.cond, INDIRECT_CONDITION);
             Object.entries(condTransformations).forEach(([key, value]) => {
               merged[key] = merged[key] ? merged[key].union(value) : value;
             });
@@ -664,7 +646,7 @@ function extractTransformationsFromExpr(
  * @calls extractColumnRefs - To find all column references in the expression
  * @calls formatInputColumnName - To format column references as keys
  */
-function extractTransformationsWithType(
+function extractColumnsWithUniformTransformation(
   expr: ExpressionValue | null | undefined,
   transformation: Transformation,
 ): ColumnTransformations {
@@ -866,14 +848,14 @@ function buildAliasToExpressionMap(select: Select): Map<string, ExpressionValue>
     return aliasMap;
   }
 
-  select.columns.forEach((col) => {
-    if (!isColumn(col)) return;
+  for (const col of select.columns) {
+    if (!isColumn(col)) continue;
 
     const outputName = getOutputColumnName(col);
     if (outputName && col.expr) {
       aliasMap.set(outputName, col.expr);
     }
-  });
+  }
 
   return aliasMap;
 }
@@ -922,7 +904,7 @@ function getOrderByLineage(select: Select, namespace: Namespace): InputField[] {
 
   const inputFields: InputField[] = [];
 
-  orderByItems.forEach((item) => {
+  for (const item of orderByItems) {
     const expr = ("expr" in item ? item.expr : item) as ExpressionValue;
 
     // Resolve the expression - if it's an alias, get the underlying expression
@@ -930,59 +912,9 @@ function getOrderByLineage(select: Select, namespace: Namespace): InputField[] {
 
     // Extract input fields from the resolved expression
     inputFields.push(...extractInputFieldsFromExpression(resolvedExpr, regularTables, namespace, INDIRECT_SORT));
-  });
-
-  return inputFields;
-}
-
-/**
- * Extracts WINDOW function lineage from SELECT columns.
- * Columns in PARTITION BY and ORDER BY clauses of OVER receive INDIRECT/WINDOW transformation.
- * @returns Array of InputFields for columns used in window function OVER clauses
- *
- * @calls getTableExpressionsFromSelect - To get regular tables from FROM
- * @calls isColumn - To filter valid columns
- * @calls extractWindowExpressions - To get OVER clause expressions
- * @calls extractInputFieldsFromExpression - To extract columns with WINDOW transformation
- */
-function getWindowLineage(select: Select, namespace: Namespace): InputField[] {
-  if (!select.columns || (typeof select.columns === "string" && select.columns === "*")) {
-    return [];
-  }
-
-  const { regularTables } = getTableExpressionsFromSelect(select);
-  const inputFields: InputField[] = [];
-
-  for (const col of select.columns) {
-    if (!isColumn(col)) continue;
-
-    const windowExprs = extractWindowExpressions(col.expr);
-    inputFields.push(
-      ...windowExprs.flatMap((expr) =>
-        extractInputFieldsFromExpression(expr, regularTables, namespace, INDIRECT_WINDOW),
-      ),
-    );
   }
 
   return inputFields;
-}
-
-/**
- * Extracts PARTITION BY and ORDER BY expressions from a window function expression.
- * Supports both aggr_func (SUM() OVER) and function types (ROW_NUMBER() OVER).
- * @returns Array of expressions from the OVER clause, empty if not a window function
- *
- * @calls extractWindowExpressionsFromOver - To parse the OVER clause structure
- */
-function extractWindowExpressions(expr: ExpressionValue): ExpressionValue[] {
-  // Support both aggr_func and function types with OVER clause
-  if ((expr.type !== "aggr_func" && expr.type !== "function") || !("over" in expr)) return [];
-
-  const exprWithOver = expr as (AggrFunc | AstFunction) & { over?: OverClause };
-
-  if (!exprWithOver.over) return [];
-
-  return extractWindowExpressionsFromOver(exprWithOver.over);
 }
 
 /**
@@ -1039,7 +971,7 @@ function getTableExpressionsFromSelect(select: Select): {
   if (select.from) {
     const fromItems = Array.isArray(select.from) ? select.from : [select.from];
 
-    fromItems.forEach((item) => {
+    for (const item of fromItems) {
       if ("table" in item) {
         // might mention with statement in our select
         const matchingWith = withByNames.get(item.table);
@@ -1059,7 +991,7 @@ function getTableExpressionsFromSelect(select: Select): {
           with: previousWiths, // propagate previous withs
         });
       }
-    });
+    }
   }
 
   return { regularTables, selectTables };
@@ -1105,16 +1037,16 @@ function expandStarColumn(column: AstColumn, select: Select, namespace: Namespac
   const expandedColumns: AstColumn[] = [];
 
   // Process regular tables (from namespace)
-  regularTables.forEach((fromTable) => {
+  for (const fromTable of regularTables) {
     // If there's a table qualifier, skip tables that don't match
     if (tableQualifier && tableQualifier !== fromTable.table && tableQualifier !== fromTable.as) {
-      return;
+      continue;
     }
 
     const schemaTable = namespace.tables!.find((t) =>
       astTableMatchesSchemaTable(fromTable, t.name, namespace.defaultSchema),
     );
-    if (!schemaTable) return;
+    if (!schemaTable) continue;
 
     for (const colName of schemaTable.columns) {
       expandedColumns.push({
@@ -1126,24 +1058,24 @@ function expandStarColumn(column: AstColumn, select: Select, namespace: Namespac
         as: colName,
       });
     }
-  });
+  }
 
   // Process subquery/CTE tables
-  selectTables.forEach((selectTable) => {
+  for (const selectTable of selectTables) {
     // If there's a table qualifier, skip tables that don't match
     if (tableQualifier && tableQualifier !== selectTable.as) {
-      return;
+      continue;
     }
 
     // Get columns from the subquery/CTE
     if (selectTable.columns && typeof selectTable.columns !== "string") {
-      selectTable.columns.forEach((subCol) => {
-        if (!isColumn(subCol)) return;
+      for (const subCol of selectTable.columns) {
+        if (!isColumn(subCol)) continue;
 
         // Handle star in subquery recursively
         if (isStar(subCol)) {
           const expandedSubCols = expandStarColumn(subCol, selectTable, namespace);
-          expandedSubCols.forEach((expandedSubCol) => {
+          for (const expandedSubCol of expandedSubCols) {
             const outputName = getOutputColumnName(expandedSubCol);
             if (outputName) {
               expandedColumns.push({
@@ -1155,7 +1087,7 @@ function expandStarColumn(column: AstColumn, select: Select, namespace: Namespac
                 as: outputName,
               });
             }
-          });
+          }
         } else {
           const outputName = getOutputColumnName(subCol);
           if (outputName) {
@@ -1169,9 +1101,9 @@ function expandStarColumn(column: AstColumn, select: Select, namespace: Namespac
             });
           }
         }
-      });
+      }
     }
-  });
+  }
 
   return expandedColumns;
 }
@@ -1233,9 +1165,10 @@ export function getColumnLineage(
   if (transformations) {
     transformationsByColumns = Object.entries(transformationsByColumns).reduce(
       (acc, [columnName, childTransformations]) => {
-        acc[columnName] = mergeTransformationSet(transformations, childTransformations);
-
-        return acc;
+        return {
+          ...acc,
+          [columnName]: mergeTransformationSet(transformations, childTransformations),
+        };
       },
       {} as Record<string, TransformationSet>,
     );
@@ -1317,7 +1250,6 @@ function getDatasetLineageForSingleSelect(select: Select, namespace: Namespace):
   allIndirectFields.push(...getFilterLineage(select, namespace));
   allIndirectFields.push(...getGroupByLineage(select, namespace));
   allIndirectFields.push(...getOrderByLineage(select, namespace));
-  allIndirectFields.push(...getWindowLineage(select, namespace));
   allIndirectFields.push(...getHavingLineage(select, namespace));
 
   // Recursively collect dataset lineage from CTEs and subqueries
@@ -1387,13 +1319,13 @@ function getLineageForSingleSelect(select: Select, namespace: Namespace): Column
       // Expand star columns into individual columns
       if (isStar(column)) {
         const expandedColumns = expandStarColumn(column, select, namespace);
-        expandedColumns.forEach((expandedCol) => {
+        for (const expandedCol of expandedColumns) {
           let outputFieldName = getOutputColumnName(expandedCol);
           if (!outputFieldName) {
             outputFieldName = `unknown_${unknownCount++}`;
           }
           acc[outputFieldName] = { inputFields: getColumnLineage(select, namespace, expandedCol) };
-        });
+        }
 
         return acc;
       }

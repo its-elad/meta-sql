@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback } from "react";
 import { GitBranch, Github } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@meta-sql/ui";
 import { SQLEditor } from "./components/editor";

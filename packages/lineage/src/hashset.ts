@@ -61,7 +61,7 @@ export class HashSet<T> implements Set<T> {
     return intersection;
   }
 
-  union(other: Set<T>): HashSet<T> {
+  union(other: HashSet<T>): HashSet<T> {
     const union = new HashSet<T>(this.hasher);
     for (const value of this) {
       union.add(value);

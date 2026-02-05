@@ -564,12 +564,12 @@ function extractTransformationsFromExpr(
       // Extract lineage from function arguments
       if (funcExpr.args?.value) {
         for (const arg of funcExpr.args.value) {
+          const maskingExpr = funcExpr.name.name.at(-1)?.value.toUpperCase();
           const argTransformations = extractTransformationsFromExpr(
             arg,
             mergeTransformations(parentTransformation, {
               ...DIRECT_TRANSFORMATION,
-              masking:
-                funcExpr.name.name.length > 0 && MASKING_FUNCTIONS.has(funcExpr.name.name.at(-1)!.value.toUpperCase()),
+              masking: !!maskingExpr && MASKING_FUNCTIONS.has(maskingExpr),
             }),
           );
           Object.entries(argTransformations).forEach(([key, value]) => {
